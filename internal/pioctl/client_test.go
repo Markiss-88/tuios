@@ -95,6 +95,40 @@ func TestRejectedMalformedAndUnreachable(t *testing.T) {
 	}
 }
 
+func TestHistory(t *testing.T) {
+	c := fake(t, func(verb string) []string {
+		if verb == "sessions.history" {
+			return []string{`{"ok":true,"result":{"id":"default","entries":[{"at":"2026-09-29T08:00:00Z","role":"user","text":"hi"}],"skipped":0}}`}
+		}
+		return []string{`{"ok":true,"result":{}}`}
+	})
+	entries, skipped, err := c.History(context.Background(), "", 200)
+	if err != nil || skipped != 0 || len(entries) != 1 || entries[0].Text != "hi" || entries[0].At.IsZero() {
+		t.Fatalf("history: entries=%+v skipped=%d err=%v", entries, skipped, err)
+	}
+}
+
+func TestHistoryRejectsUnknownAndBadLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply string
+		id          string
+		limit       int
+		code        string
+	}{
+		{"unknown", `{"ok":false,"error":{"code":"not_found","message":"Unknown chat session: gone"}}`, "gone", 200, "not_found"},
+		{"bad limit", `{"ok":false,"error":{"code":"invalid_params","message":"limit must be an integer from 1 to 2000"}}`, "", 0, "invalid_params"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake(t, func(string) []string { return []string{tc.reply} })
+			_, _, err := c.History(context.Background(), tc.id, tc.limit)
+			var requestErr *RequestError
+			if !errors.As(err, &requestErr) || requestErr.Code != tc.code {
+				t.Fatalf("err=%v, want %s", err, tc.code)
+			}
+		})
+	}
+}
+
 // TestLiveAgainstRealPio protects the client from fake-only wire assumptions.
 // Run it against a running pio with:
 // PIO_LIVE_ROOT=/path/to/pio-workspace go test ./internal/pioctl -run TestLiveAgainstRealPio -count=1
@@ -148,6 +182,10 @@ func TestLiveAgainstRealPio(t *testing.T) {
 	result, err := c.Send(ctx, created.ID, "Reply with one word: pong", func(json.RawMessage) { events++ })
 	if err != nil || !result.OK || events < 1 {
 		t.Fatalf("send: result=%+v err=%v events=%d", result, err, events)
+	}
+	entries, _, err := c.History(ctx, created.ID, 200)
+	if err != nil || len(entries) < 2 || entries[len(entries)-2].Role != "user" || entries[len(entries)-1].Role != "assistant" {
+		t.Fatalf("history after send: entries=%+v err=%v", entries, err)
 	}
 	events = 0
 	_, err = c.Send(ctx, "no-such-session", "hello", func(json.RawMessage) { events++ })

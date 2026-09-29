@@ -736,10 +736,8 @@ func (m *OS) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleMsg is Update's body: one switch over every message the client can see.
 func (m *OS) handleMsg(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
-	if _, ok := msg.(SproutRefreshMsg); ok {
-		return m, m.handleSproutMsg(msg)
-	}
-	if _, ok := msg.(SproutTickMsg); ok {
+	switch msg.(type) {
+	case SproutRefreshMsg, SproutHistoryMsg, SproutCreateMsg, SproutStreamMsg, SproutTickMsg:
 		return m, m.handleSproutMsg(msg)
 	}
 	// The crash overlay owns the keyboard while it is up, and it is answered

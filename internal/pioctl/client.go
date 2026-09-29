@@ -53,6 +53,12 @@ type ChatResult struct {
 	Text  string `json:"text"`
 	Error string `json:"error,omitempty"`
 }
+type Entry struct {
+	At    time.Time `json:"at"`
+	Role  string    `json:"role"`
+	Text  string    `json:"text"`
+	Error string    `json:"error"`
+}
 type response struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result"`
@@ -144,6 +150,21 @@ func (c *Client) GetConfig(ctx context.Context) (Config, error) {
 	b, err := c.call(ctx, "config.get", nil, nil)
 	var out Config
 	return out, decode(b, &out, err)
+}
+func (c *Client) History(ctx context.Context, id string, limit int) (entries []Entry, skipped int, err error) {
+	params := map[string]any{"limit": limit}
+	if id != "" {
+		params["id"] = id
+	}
+	b, err := c.call(ctx, "sessions.history", params, nil)
+	var out struct {
+		Entries []Entry `json:"entries"`
+		Skipped int     `json:"skipped"`
+	}
+	if err := decode(b, &out, err); err != nil {
+		return nil, 0, err
+	}
+	return out.Entries, out.Skipped, nil
 }
 func (c *Client) Send(ctx context.Context, session, text string, event func(json.RawMessage)) (ChatResult, error) {
 	b, err := c.call(ctx, "chat.send", map[string]string{"session": session, "text": text}, event)
