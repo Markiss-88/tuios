@@ -42,6 +42,45 @@ type Session struct {
 	Title  string `json:"title"`
 	Active bool   `json:"active"`
 }
+type Task struct {
+	ID             string    `json:"id"`
+	Title          string    `json:"title"`
+	Status         string    `json:"status"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	Attempt        int       `json:"attempt"`
+	ReviewRequired bool      `json:"review_required"`
+	WaitingFor     string    `json:"waiting_for"`
+	Body           string    `json:"body"`
+}
+type Goal struct {
+	ID              string    `json:"id"`
+	Title           string    `json:"title"`
+	Status          string    `json:"status"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	SuccessCriteria string    `json:"success_criteria"`
+	ReviewTrigger   string    `json:"review_trigger"`
+	Round           int       `json:"round"`
+	RoundTaskIDs    []string  `json:"round_task_ids"`
+	Body            string    `json:"body"`
+}
+type Job struct {
+	Number    int        `json:"number"`
+	Kind      string     `json:"kind"`
+	TaskID    string     `json:"taskId"`
+	State     string     `json:"state"`
+	StartedAt time.Time  `json:"startedAt"`
+	EndedAt   *time.Time `json:"endedAt"`
+	Output    []string   `json:"output"`
+	Error     string     `json:"error"`
+}
+type HarnessResult struct {
+	Name     string `json:"name"`
+	Model    string `json:"model"`
+	Previous struct {
+		Name  string `json:"name"`
+		Model string `json:"model"`
+	} `json:"previous"`
+}
 type Config struct {
 	Harness struct {
 		Name  string `json:"name"`
@@ -149,6 +188,52 @@ func (c *Client) Switch(ctx context.Context, id string) error {
 func (c *Client) GetConfig(ctx context.Context) (Config, error) {
 	b, err := c.call(ctx, "config.get", nil, nil)
 	var out Config
+	return out, decode(b, &out, err)
+}
+func (c *Client) Tasks(ctx context.Context, status string) ([]Task, error) {
+	var params any
+	if status != "" {
+		params = map[string]string{"status": status}
+	}
+	b, err := c.call(ctx, "tasks.list", params, nil)
+	var out []Task
+	return out, decode(b, &out, err)
+}
+func (c *Client) Goals(ctx context.Context, status string) ([]Goal, error) {
+	var params any
+	if status != "" {
+		params = map[string]string{"status": status}
+	}
+	b, err := c.call(ctx, "goals.list", params, nil)
+	var out []Goal
+	return out, decode(b, &out, err)
+}
+func (c *Client) Jobs(ctx context.Context, recent bool) ([]Job, error) {
+	var params any
+	if recent {
+		params = map[string]bool{"recent": true}
+	}
+	b, err := c.call(ctx, "jobs.list", params, nil)
+	var out []Job
+	return out, decode(b, &out, err)
+}
+func (c *Client) CreateTask(ctx context.Context, title string) (Task, error) {
+	b, err := c.call(ctx, "tasks.create", map[string]string{"title": title}, nil)
+	var out Task
+	return out, decode(b, &out, err)
+}
+func (c *Client) CreateGoal(ctx context.Context, title string) (Goal, error) {
+	b, err := c.call(ctx, "goals.create", map[string]string{"title": title}, nil)
+	var out Goal
+	return out, decode(b, &out, err)
+}
+func (c *Client) SetHarness(ctx context.Context, name, model string) (HarnessResult, error) {
+	params := map[string]string{"name": name}
+	if model != "" {
+		params["model"] = model
+	}
+	b, err := c.call(ctx, "harness.set", params, nil)
+	var out HarnessResult
 	return out, decode(b, &out, err)
 }
 func (c *Client) History(ctx context.Context, id string, limit int) (entries []Entry, skipped int, err error) {

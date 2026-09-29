@@ -19,14 +19,28 @@ type sproutClient interface {
 	Create(context.Context, string) (pioctl.Session, error)
 	Switch(context.Context, string) error
 	GetConfig(context.Context) (pioctl.Config, error)
+	Tasks(context.Context, string) ([]pioctl.Task, error)
+	Goals(context.Context, string) ([]pioctl.Goal, error)
+	Jobs(context.Context, bool) ([]pioctl.Job, error)
+	CreateTask(context.Context, string) (pioctl.Task, error)
+	CreateGoal(context.Context, string) (pioctl.Goal, error)
+	SetHarness(context.Context, string, string) (pioctl.HarnessResult, error)
 	History(context.Context, string, int) ([]pioctl.Entry, int, error)
 	Send(context.Context, string, string, func(json.RawMessage)) (pioctl.ChatResult, error)
 }
 
 type SproutState struct {
 	Tab, Subnav, Filter, Cursor int
+	TaskFilter, GoalFilter      int
+	TaskCursor, GoalCursor      int
+	RecentJobs                  bool
+	Picker                      int
+	ModelDraft                  string
 	Focus, Selected             string
 	Sessions                    []pioctl.Session
+	Tasks                       []pioctl.Task
+	Goals                       []pioctl.Goal
+	Jobs                        []pioctl.Job
 	Config                      pioctl.Config
 	Transcript                  []pioctl.Entry
 	Composer, Status            string
@@ -58,6 +72,25 @@ type SproutCreateMsg struct {
 	Err     error
 	Gen     uint64
 }
+type SproutBoardMsg struct {
+	Tasks []pioctl.Task
+	Goals []pioctl.Goal
+	Jobs  []pioctl.Job
+	Err   error
+	Gen   uint64
+}
+type SproutCreatedMsg struct {
+	Subnav int
+	Task   pioctl.Task
+	Goal   pioctl.Goal
+	Err    error
+	Gen    uint64
+}
+type SproutHarnessMsg struct {
+	Result pioctl.HarnessResult
+	Err    error
+	Gen    uint64
+}
 type SproutStreamMsg struct {
 	Session     string
 	Type        string
@@ -87,6 +120,28 @@ func (s *SproutState) visibleSessions() []pioctl.Session {
 		}
 	}
 	return sessions
+}
+func (s *SproutState) visibleTasks() []pioctl.Task {
+	var out []pioctl.Task
+	for _, task := range s.Tasks {
+		open := task.Status == "todo" || task.Status == "working" || task.Status == "review" || task.Status == "waiting"
+		done := task.Status == "done" || task.Status == "failed" || task.Status == "cancelled"
+		if s.TaskFilter == 0 || (s.TaskFilter == 1 && open) || (s.TaskFilter == 2 && done) {
+			out = append(out, task)
+		}
+	}
+	return out
+}
+func (s *SproutState) visibleGoals() []pioctl.Goal {
+	var out []pioctl.Goal
+	for _, goal := range s.Goals {
+		active := goal.Status == "proposed" || goal.Status == "planning" || goal.Status == "active" || goal.Status == "review" || goal.Status == "reviewing" || goal.Status == "waiting"
+		closed := goal.Status == "done" || goal.Status == "abandoned"
+		if s.GoalFilter == 0 || (s.GoalFilter == 1 && active) || (s.GoalFilter == 2 && closed) {
+			out = append(out, goal)
+		}
+	}
+	return out
 }
 
 func sproutPrintable(key string) bool {
@@ -147,6 +202,54 @@ func (m *OS) sproutCreateCmd() tea.Cmd {
 		}
 		session, err := client.Create(context.Background(), "")
 		return SproutCreateMsg{Session: session, Err: err, Gen: gen}
+	}
+}
+func (m *OS) sproutBoardCmd() tea.Cmd {
+	gen, client, recent := m.Sprout.gen, m.Sprout.client, m.Sprout.RecentJobs
+	return func() tea.Msg {
+		if client == nil {
+			return SproutBoardMsg{Err: pioctl.ErrUnreachable, Gen: gen}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		tasks, err := client.Tasks(ctx, "")
+		if err != nil {
+			return SproutBoardMsg{Err: err, Gen: gen}
+		}
+		goals, err := client.Goals(ctx, "")
+		if err != nil {
+			return SproutBoardMsg{Err: err, Gen: gen}
+		}
+		jobs, err := client.Jobs(ctx, recent)
+		return SproutBoardMsg{Tasks: tasks, Goals: goals, Jobs: jobs, Err: err, Gen: gen}
+	}
+}
+func (m *OS) sproutCreatedCmd(subnav int, title string) tea.Cmd {
+	gen, client := m.Sprout.gen, m.Sprout.client
+	return func() tea.Msg {
+		if client == nil {
+			return SproutCreatedMsg{Subnav: subnav, Err: pioctl.ErrUnreachable, Gen: gen}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if subnav == 1 {
+			task, err := client.CreateTask(ctx, title)
+			return SproutCreatedMsg{Subnav: subnav, Task: task, Err: err, Gen: gen}
+		}
+		goal, err := client.CreateGoal(ctx, title)
+		return SproutCreatedMsg{Subnav: subnav, Goal: goal, Err: err, Gen: gen}
+	}
+}
+func (m *OS) sproutHarnessCmd(name, model string) tea.Cmd {
+	gen, client := m.Sprout.gen, m.Sprout.client
+	return func() tea.Msg {
+		if client == nil {
+			return SproutHarnessMsg{Err: pioctl.ErrUnreachable, Gen: gen}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		result, err := client.SetHarness(ctx, name, model)
+		return SproutHarnessMsg{Result: result, Err: err, Gen: gen}
 	}
 }
 func (m *OS) sproutTick() tea.Cmd {
@@ -232,6 +335,43 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		return m.selectSproutSession(x.Session.ID)
+	case SproutBoardMsg:
+		if x.Gen != s.gen || !m.ShowSprout {
+			return nil
+		}
+		if x.Err != nil {
+			s.Status = sproutError(x.Err)
+			return nil
+		}
+		s.Tasks, s.Goals, s.Jobs, s.Connected = x.Tasks, x.Goals, x.Jobs, true
+	case SproutCreatedMsg:
+		if x.Gen != s.gen || !m.ShowSprout {
+			return nil
+		}
+		if x.Err != nil {
+			s.Status = sproutError(x.Err)
+			return nil
+		}
+		if x.Subnav == 1 {
+			s.Tasks = append(s.Tasks, x.Task)
+			s.TaskCursor = max(0, len(s.visibleTasks())-1)
+			s.Status = "task created: " + x.Task.ID
+		} else {
+			s.Goals = append(s.Goals, x.Goal)
+			s.GoalCursor = max(0, len(s.visibleGoals())-1)
+			s.Status = "goal created: " + x.Goal.ID
+		}
+		s.Composer = ""
+	case SproutHarnessMsg:
+		if x.Gen != s.gen || !m.ShowSprout {
+			return nil
+		}
+		if x.Err != nil {
+			s.Status, s.Focus = sproutError(x.Err), "sidebar"
+			return nil
+		}
+		s.Config.Harness.Name, s.Config.Harness.Model = x.Result.Name, x.Result.Model
+		s.Status, s.Focus = "harness: "+x.Result.Name+" "+x.Result.Model, "sidebar"
 	case SproutStreamMsg:
 		terminal := x.Type == ""
 		// WHY: a command may outlive its pane; generation keeps its stream off a new chat.
@@ -287,10 +427,24 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 	case SproutTickMsg:
 		if x.Gen == s.gen && m.ShowSprout {
 			m.renderSkipped = false
+			if s.Subnav != 0 {
+				return tea.Batch(m.sproutRefreshCmd(), m.sproutBoardCmd())
+			}
 			return m.sproutRefreshCmd()
 		}
 	}
 	return nil
+}
+
+func sproutError(err error) string {
+	if errors.Is(err, pioctl.ErrUnreachable) {
+		return "pio: unreachable"
+	}
+	var requestErr *pioctl.RequestError
+	if errors.As(err, &requestErr) {
+		return requestErr.Message
+	}
+	return "pio: " + err.Error()
 }
 
 func (m *OS) SproutConnected() bool { return m.Sprout.Connected }
@@ -310,7 +464,16 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 				s.Composer = s.Composer[:len(s.Composer)-size]
 			}
 		case "enter":
-			if s.Composer != "" && !s.Sending {
+			if s.Composer == "" {
+				return nil
+			}
+			if s.Subnav == 1 {
+				return m.sproutCreatedCmd(1, s.Composer)
+			}
+			if s.Subnav == 2 {
+				return m.sproutCreatedCmd(2, s.Composer)
+			}
+			if !s.Sending {
 				s.Transcript = append(s.Transcript, pioctl.Entry{Role: "user", Text: s.Composer})
 				s.Status, s.Sending, s.liveTurn, s.Follow = "thinking…", true, -1, true
 				s.pendingUser, s.pendingText = len(s.Transcript)-1, s.Composer
@@ -321,6 +484,49 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 			if sproutPrintable(key) {
 				s.Composer += key
 			}
+		}
+		return nil
+	}
+	if s.Focus == "model" {
+		switch key {
+		case "esc":
+			s.ModelDraft, s.Focus = "", "sidebar"
+		case "backspace":
+			if len(s.ModelDraft) > 0 {
+				_, size := utf8.DecodeLastRuneInString(s.ModelDraft)
+				s.ModelDraft = s.ModelDraft[:len(s.ModelDraft)-size]
+			}
+		case "enter":
+			if s.ModelDraft == "" {
+				s.Status = "model cannot be empty"
+				return nil
+			}
+			return m.sproutHarnessCmd(s.Config.Harness.Name, s.ModelDraft)
+		default:
+			if sproutPrintable(key) {
+				s.ModelDraft += key
+			}
+		}
+		return nil
+	}
+	if s.Focus == "picker" {
+		const harnesses = 3
+		switch key {
+		case "esc":
+			s.Focus = "sidebar"
+		case "j", "down":
+			s.Picker = sproutTabIndex(s.Picker, harnesses, 1)
+		case "k", "up":
+			s.Picker = sproutTabIndex(s.Picker, harnesses, -1)
+		case "enter":
+			// WHY: pio owns accepted harness names and their implementation status.
+			return m.sproutHarnessCmd([]string{"codex", "claude-code", "agent-zero"}[s.Picker], "")
+		}
+		return nil
+	}
+	if s.Focus == "hints" {
+		if key == "?" || key == "esc" {
+			s.Focus = "sidebar"
 		}
 		return nil
 	}
@@ -340,22 +546,48 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 		}
 	case "tab":
 		s.Subnav = (s.Subnav + 1) % 3
+		if s.Subnav != 0 {
+			return m.sproutBoardCmd()
+		}
 	case "i":
 		s.Focus = "composer"
 	case "f":
-		if s.Focus == "sidebar" {
+		switch s.Subnav {
+		case 0:
 			s.Filter = (s.Filter + 1) % 4
 			s.Cursor = 0
+		case 1:
+			s.TaskFilter = (s.TaskFilter + 1) % 3
+			s.TaskCursor = 0
+		case 2:
+			s.GoalFilter = (s.GoalFilter + 1) % 3
+			s.GoalCursor = 0
 		}
 	case "j", "down":
-		if s.Focus == "main" {
+		if s.Subnav == 1 {
+			if tasks := s.visibleTasks(); len(tasks) > 0 {
+				s.TaskCursor = (s.TaskCursor + 1) % len(tasks)
+			}
+		} else if s.Subnav == 2 {
+			if goals := s.visibleGoals(); len(goals) > 0 {
+				s.GoalCursor = (s.GoalCursor + 1) % len(goals)
+			}
+		} else if s.Focus == "main" {
 			s.Scroll++
 			s.Follow = false
 		} else if sessions := s.visibleSessions(); len(sessions) > 0 {
 			s.Cursor = (s.Cursor + 1) % len(sessions)
 		}
 	case "k", "up":
-		if s.Focus == "main" {
+		if s.Subnav == 1 {
+			if tasks := s.visibleTasks(); len(tasks) > 0 {
+				s.TaskCursor = (s.TaskCursor + len(tasks) - 1) % len(tasks)
+			}
+		} else if s.Subnav == 2 {
+			if goals := s.visibleGoals(); len(goals) > 0 {
+				s.GoalCursor = (s.GoalCursor + len(goals) - 1) % len(goals)
+			}
+		} else if s.Focus == "main" {
 			if s.Scroll > 0 {
 				s.Scroll--
 			}
@@ -385,15 +617,28 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 			return m.selectSproutSession(sessions[s.Cursor].ID)
 		}
 	case "n":
-		return m.sproutCreateCmd()
+		if s.Subnav == 0 {
+			return m.sproutCreateCmd()
+		}
+		s.Focus = "composer"
+	case "r":
+		if s.Subnav == 2 {
+			s.RecentJobs = !s.RecentJobs
+			return m.sproutBoardCmd()
+		}
+	case "h":
+		s.Focus, s.Picker = "picker", 0
+		for i, name := range []string{"codex", "claude-code", "agent-zero"} {
+			if s.Config.Harness.Name == name {
+				s.Picker = i
+			}
+		}
+	case "m":
+		s.Focus, s.ModelDraft = "model", s.Config.Harness.Model
 	case "p":
 		m.OpenSessionSwitcher()
 	case "?":
-		if s.Focus == "hints" {
-			s.Focus = "sidebar"
-		} else {
-			s.Focus = "hints"
-		}
+		s.Focus = "hints"
 	}
 	return nil
 }

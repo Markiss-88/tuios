@@ -1,0 +1,4 @@
+{"id":1,"event":{"type":"status","text":"thinking"}}
+{"id":1,"event":{"type":"delta","text":"echo: "}}
+{"id":1,"event":{"type":"delta","text":"hello"}}
+{"id":1,"ok":true,"done":true,"result":{"ok":true,"text":"echo: hello"}}

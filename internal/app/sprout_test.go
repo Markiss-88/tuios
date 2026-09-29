@@ -3,26 +3,40 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/Gaurav-Gosain/tuios/internal/config"
 	"github.com/Gaurav-Gosain/tuios/internal/pioctl"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type fakeSproutClient struct {
-	sessions []pioctl.Session
-	history  map[string][]pioctl.Entry
-	switched []string
-	created  pioctl.Session
-	send     pioctl.ChatResult
-	sendErr  error
-	events   []json.RawMessage
+	sessions                                                      []pioctl.Session
+	history                                                       map[string][]pioctl.Entry
+	switched                                                      []string
+	created                                                       pioctl.Session
+	send                                                          pioctl.ChatResult
+	sendErr                                                       error
+	events                                                        []json.RawMessage
+	tasks                                                         []pioctl.Task
+	goals                                                         []pioctl.Goal
+	jobs                                                          []pioctl.Job
+	config                                                        pioctl.Config
+	task                                                          pioctl.Task
+	goal                                                          pioctl.Goal
+	harness                                                       pioctl.HarnessResult
+	tasksErr, goalsErr, jobsErr, taskErr, goalErr, harnessErr     error
+	setHarness                                                    [][2]string
+	sessionsCalls, configCalls, tasksCalls, goalsCalls, jobsCalls int
 }
 
 func (f *fakeSproutClient) Sessions(context.Context) ([]pioctl.Session, error) {
+	f.sessionsCalls++
 	return f.sessions, nil
 }
 func (f *fakeSproutClient) Create(context.Context, string) (pioctl.Session, error) {
@@ -33,7 +47,30 @@ func (f *fakeSproutClient) Switch(_ context.Context, id string) error {
 	return nil
 }
 func (f *fakeSproutClient) GetConfig(context.Context) (pioctl.Config, error) {
-	return pioctl.Config{}, nil
+	f.configCalls++
+	return f.config, nil
+}
+func (f *fakeSproutClient) Tasks(context.Context, string) ([]pioctl.Task, error) {
+	f.tasksCalls++
+	return f.tasks, f.tasksErr
+}
+func (f *fakeSproutClient) Goals(context.Context, string) ([]pioctl.Goal, error) {
+	f.goalsCalls++
+	return f.goals, f.goalsErr
+}
+func (f *fakeSproutClient) Jobs(context.Context, bool) ([]pioctl.Job, error) {
+	f.jobsCalls++
+	return f.jobs, f.jobsErr
+}
+func (f *fakeSproutClient) CreateTask(context.Context, string) (pioctl.Task, error) {
+	return f.task, f.taskErr
+}
+func (f *fakeSproutClient) CreateGoal(context.Context, string) (pioctl.Goal, error) {
+	return f.goal, f.goalErr
+}
+func (f *fakeSproutClient) SetHarness(_ context.Context, name, model string) (pioctl.HarnessResult, error) {
+	f.setHarness = append(f.setHarness, [2]string{name, model})
+	return f.harness, f.harnessErr
 }
 func (f *fakeSproutClient) History(_ context.Context, id string, _ int) ([]pioctl.Entry, int, error) {
 	return f.history[id], 0, nil
@@ -46,7 +83,7 @@ func (f *fakeSproutClient) Send(_ context.Context, _ string, _ string, event fun
 }
 
 func sproutOS(client *fakeSproutClient) *OS {
-	return &OS{Settings: config.Global, Width: 120, Height: 40, ShowSprout: true, Sprout: SproutState{client: client, Sessions: client.sessions, Focus: "sidebar", Follow: true, liveTurn: -1, pendingUser: -1}}
+	return &OS{Settings: config.Global, Width: 120, Height: 40, ShowSprout: true, Sprout: SproutState{client: client, Sessions: client.sessions, Tasks: client.tasks, Goals: client.goals, Jobs: client.jobs, Config: client.config, Focus: "sidebar", Follow: true, liveTurn: -1, pendingUser: -1}}
 }
 func driveSprout(t *testing.T, m *OS, cmd tea.Cmd) {
 	t.Helper()
@@ -211,15 +248,15 @@ func TestSproutKeysCycleAndClose(t *testing.T) {
 	if m.Sprout.Filter != 0 {
 		t.Fatalf("filter=%d", m.Sprout.Filter)
 	}
-	m.Sprout.Sessions = []pioctl.Session{{ID: "a"}, {ID: "b"}}
+	m.Sprout.Tasks = []pioctl.Task{{ID: "a"}, {ID: "b"}}
 	m.SproutHandleKey("tab")
 	if m.Sprout.Subnav != 1 {
 		t.Fatalf("subnav=%d", m.Sprout.Subnav)
 	}
 	m.Sprout.Cursor = 0
 	m.SproutHandleKey("k")
-	if m.Sprout.Cursor != 1 {
-		t.Fatalf("cursor=%d", m.Sprout.Cursor)
+	if m.Sprout.TaskCursor != 1 {
+		t.Fatalf("task cursor=%d", m.Sprout.TaskCursor)
 	}
 	m.SproutHandleKey("esc")
 	if m.ShowSprout {
@@ -235,5 +272,219 @@ func TestSproutCountsReuseSidebarGroups(t *testing.T) {
 func TestSproutPaletteReachable(t *testing.T) {
 	if paletteItemNamed(GetCommandPaletteItems(&config.Global), "Open Sprout").Action == nil {
 		t.Fatal("Open Sprout missing")
+	}
+}
+
+func TestSproutBoardFiltersAndRender(t *testing.T) {
+	fake := &fakeSproutClient{tasks: []pioctl.Task{{ID: "done", Title: "Done", Status: "done", UpdatedAt: time.Now(), Body: "done body"}, {ID: "working", Title: "Working", Status: "working", UpdatedAt: time.Now(), Attempt: 2, ReviewRequired: true, Body: "working body"}, {ID: "todo", Title: "Todo", Status: "todo", UpdatedAt: time.Now()}}, goals: []pioctl.Goal{{ID: "old", Title: "Old", Status: "abandoned"}, {ID: "live", Title: "Live", Status: "active", SuccessCriteria: "ship", Body: "goal body"}}}
+	m := sproutOS(fake)
+	driveSprout(t, m, m.SproutHandleKey("tab"))
+	m.Sprout.TaskCursor = 1
+	if got := m.renderSprout(); !strings.Contains(got, "✓ Done") || !strings.Contains(got, "working body") || !strings.Contains(got, "[All 3]  Open 2  Done 1") {
+		t.Fatalf("files board:\n%s", got)
+	}
+	m.SproutHandleKey("f")
+	if len(m.Sprout.visibleTasks()) != 2 {
+		t.Fatalf("open=%d", len(m.Sprout.visibleTasks()))
+	}
+	m.SproutHandleKey("f")
+	if len(m.Sprout.visibleTasks()) != 1 {
+		t.Fatalf("done=%d", len(m.Sprout.visibleTasks()))
+	}
+	driveSprout(t, m, m.SproutHandleKey("tab"))
+	m.SproutHandleKey("f")
+	if len(m.Sprout.visibleGoals()) != 1 {
+		t.Fatalf("active=%d", len(m.Sprout.visibleGoals()))
+	}
+	m.SproutHandleKey("f")
+	if len(m.Sprout.visibleGoals()) != 1 {
+		t.Fatalf("closed=%d", len(m.Sprout.visibleGoals()))
+	}
+}
+
+func TestSproutBoardTickRefreshesAndRearmsOnce(t *testing.T) {
+	fake := &fakeSproutClient{sessions: []pioctl.Session{{ID: "a"}}, tasks: []pioctl.Task{{ID: "t"}}, goals: []pioctl.Goal{{ID: "g"}}, jobs: []pioctl.Job{{Number: 1}}}
+	m := sproutOS(fake)
+	m.Sprout.gen, m.Sprout.Subnav = 1, 1
+	batch, ok := m.handleSproutMsg(SproutTickMsg{Gen: 1})().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("batch=%T len=%d", batch, len(batch))
+	}
+	ticks := 0
+	for _, cmd := range batch {
+		switch msg := cmd().(type) {
+		case SproutRefreshMsg:
+			if rearm := m.handleSproutMsg(msg); rearm != nil {
+				if _, ok := rearm().(SproutTickMsg); !ok {
+					t.Fatalf("rearm=%T", rearm())
+				}
+				ticks++
+			}
+		case SproutBoardMsg:
+			m.handleSproutMsg(msg)
+		default:
+			t.Fatalf("message=%T", msg)
+		}
+	}
+	if fake.sessionsCalls != 1 || fake.configCalls != 1 || fake.tasksCalls != 1 || fake.goalsCalls != 1 || fake.jobsCalls != 1 || ticks != 1 {
+		t.Fatalf("calls sessions=%d config=%d tasks=%d goals=%d jobs=%d ticks=%d", fake.sessionsCalls, fake.configCalls, fake.tasksCalls, fake.goalsCalls, fake.jobsCalls, ticks)
+	}
+}
+
+func TestSproutCreatesTaskAndGoal(t *testing.T) {
+	fake := &fakeSproutClient{task: pioctl.Task{ID: "made", Title: "Made", Status: "todo"}, goal: pioctl.Goal{ID: "goal", Title: "Goal", Status: "proposed"}}
+	m := sproutOS(fake)
+	m.Sprout.Subnav, m.Sprout.Focus, m.Sprout.Composer = 1, "composer", "Made"
+	driveSprout(t, m, m.SproutHandleKey("enter"))
+	if len(m.Sprout.Tasks) != 1 || m.Sprout.Status != "task created: made" || m.Sprout.Composer != "" || m.Sprout.TaskCursor != 0 {
+		t.Fatalf("tasks=%+v state=%+v", m.Sprout.Tasks, m.Sprout)
+	}
+	m.Sprout.Subnav, m.Sprout.Focus, m.Sprout.Composer = 2, "composer", "Goal"
+	driveSprout(t, m, m.SproutHandleKey("enter"))
+	if len(m.Sprout.Goals) != 1 || m.Sprout.Status != "goal created: goal" || m.Sprout.Composer != "" || m.Sprout.GoalCursor != 0 {
+		t.Fatalf("goals=%+v state=%+v", m.Sprout.Goals, m.Sprout)
+	}
+	fake.taskErr = &pioctl.RequestError{Code: "invalid_params", Message: "title required"}
+	m.Sprout.Subnav, m.Sprout.Focus, m.Sprout.Composer = 1, "composer", "keep"
+	driveSprout(t, m, m.SproutHandleKey("enter"))
+	if m.Sprout.Composer != "keep" || m.Sprout.Status != "title required" {
+		t.Fatalf("composer=%q status=%q", m.Sprout.Composer, m.Sprout.Status)
+	}
+}
+
+func TestSproutHarnessPickerAndModel(t *testing.T) {
+	fake := &fakeSproutClient{}
+	fake.harness.Name, fake.harness.Model, fake.harness.Previous.Name = "claude-code", "gpt-5.6-terra", "codex"
+	m := sproutOS(fake)
+	m.Sprout.Config.Harness.Name, m.Sprout.Config.Harness.Model = "codex", "old"
+	m.SproutHandleKey("h")
+	m.SproutHandleKey("j")
+	driveSprout(t, m, m.SproutHandleKey("enter"))
+	if got := fake.setHarness[0]; got != [2]string{"claude-code", ""} || m.Sprout.Config.Harness.Name != "claude-code" {
+		t.Fatalf("calls=%v config=%+v", fake.setHarness, m.Sprout.Config)
+	}
+	old := m.Sprout.Config.Harness.Name
+	fake.harnessErr = &pioctl.RequestError{Code: "busy", Message: "Cannot change harness: 1 live turn, 0 live jobs"}
+	m.SproutHandleKey("h")
+	driveSprout(t, m, m.SproutHandleKey("enter"))
+	if m.Sprout.Config.Harness.Name != old || m.Sprout.Status != "Cannot change harness: 1 live turn, 0 live jobs" {
+		t.Fatalf("config=%+v status=%q", m.Sprout.Config, m.Sprout.Status)
+	}
+	fake.harnessErr = nil
+	fake.harness.Name, fake.harness.Model = "claude-code", "opus-5"
+	m.Sprout.Config.Harness.Model = ""
+	m.SproutHandleKey("m")
+	for _, key := range strings.Split("opus-5", "") {
+		m.SproutHandleKey(key)
+	}
+	driveSprout(t, m, m.SproutHandleKey("enter"))
+	if got := fake.setHarness[len(fake.setHarness)-1]; got != [2]string{"claude-code", "opus-5"} {
+		t.Fatalf("model call=%v", got)
+	}
+	m.Sprout.Config.Harness.Model = "original"
+	m.SproutHandleKey("m")
+	m.SproutHandleKey("x")
+	m.SproutHandleKey("esc")
+	if m.Sprout.Config.Harness.Model != "original" {
+		t.Fatalf("model=%q", m.Sprout.Config.Harness.Model)
+	}
+}
+
+func TestSproutStaleBoardCreateHarnessAndHints(t *testing.T) {
+	m := sproutOS(&fakeSproutClient{})
+	m.Sprout.gen = 7
+	m.CloseSprout()
+	m.handleSproutMsg(SproutBoardMsg{Gen: 7, Tasks: []pioctl.Task{{ID: "bad"}}})
+	m.handleSproutMsg(SproutCreatedMsg{Gen: 7, Subnav: 1, Task: pioctl.Task{ID: "bad"}})
+	m.handleSproutMsg(SproutHarnessMsg{Gen: 7, Result: pioctl.HarnessResult{Name: "bad"}})
+	if len(m.Sprout.Tasks) != 0 || m.Sprout.Config.Harness.Name != "" {
+		t.Fatalf("stale applied: %+v", m.Sprout)
+	}
+	m.ShowSprout, m.Sprout.Focus = true, "sidebar"
+	m.SproutHandleKey("?")
+	if got := m.renderSprout(); !strings.Contains(got, "Sprout keys") || !strings.Contains(got, "h harness") {
+		t.Fatalf("hints:\n%s", got)
+	}
+	m.SproutHandleKey("esc")
+	if m.Sprout.Focus != "sidebar" {
+		t.Fatalf("focus=%q", m.Sprout.Focus)
+	}
+}
+
+func TestSproutFilesComposerSwallowsKeysAndFrames(t *testing.T) {
+	fake := &fakeSproutClient{tasks: []pioctl.Task{{Title: "Task", Status: "working", Body: "body"}}, goals: []pioctl.Goal{{Title: "Goal", Status: "active", Body: "body"}}, jobs: []pioctl.Job{{Number: 3, Kind: "implement", TaskID: "task", State: "running", StartedAt: time.Now()}}}
+	for _, subnav := range []int{1, 2} {
+		for _, size := range [][2]int{{80, 24}, {120, 40}} {
+			m := sproutOS(fake)
+			m.Width, m.Height, m.Sprout.Subnav = size[0], size[1], subnav
+			out := m.renderSprout()
+			if len(strings.Split(out, "\n")) != size[1] {
+				t.Fatalf("%d %dx%d lines=%d", subnav, size[0], size[1], len(strings.Split(out, "\n")))
+			}
+			for _, line := range strings.Split(out, "\n") {
+				if lipgloss.Width(line) > size[0] {
+					t.Fatalf("%d %dx%d overflow %q", subnav, size[0], size[1], line)
+				}
+			}
+		}
+	}
+	m := sproutOS(fake)
+	m.Sprout.Subnav, m.Sprout.Focus = 1, "composer"
+	for _, key := range []string{"h", "m", "r", "f"} {
+		m.SproutHandleKey(key)
+	}
+	if m.Sprout.Composer != "hmrf" {
+		t.Fatalf("composer=%q", m.Sprout.Composer)
+	}
+	m.Sprout.Focus, m.Sprout.Picker = "picker", 1
+	if got := m.renderSprout(); !strings.Contains(got, "> claude-code") || !strings.Contains(got, "body") {
+		t.Fatalf("picker:\n%s", got)
+	}
+}
+
+func TestSproutFrameDump(t *testing.T) {
+	if os.Getenv("SPROUT_DUMP") != "1" {
+		t.Skip("set SPROUT_DUMP=1")
+	}
+	now := time.Now()
+	model := "gpt-5.6-terra"
+	fake := &fakeSproutClient{
+		sessions: []pioctl.Session{{ID: "a", Name: "Alpha", Active: true}, {ID: "b", Name: "Beta"}},
+		tasks:    []pioctl.Task{{ID: "todo", Title: "Write frame dump", Status: "todo", Body: "Task body stays visible under the picker.", UpdatedAt: now}, {ID: "working", Title: "Refresh board", Status: "working", Body: "Working body", UpdatedAt: now}, {ID: "done", Title: "Done task", Status: "done", UpdatedAt: now}},
+		goals:    []pioctl.Goal{{ID: "ship", Title: "Ship Sprout", Status: "active", SuccessCriteria: "All checks green", Body: "Goal body", UpdatedAt: now}, {ID: "old", Title: "Old goal", Status: "abandoned", UpdatedAt: now}},
+		jobs:     []pioctl.Job{{Number: 1, Kind: "implement", TaskID: "working", State: "running", StartedAt: now}, {Number: 2, Kind: "review", TaskID: "done", State: "error", Error: "failed", StartedAt: now, EndedAt: &now}},
+	}
+	fake.config.Harness.Name, fake.config.Harness.Model = "codex", model
+	views := []struct {
+		name  string
+		apply func(*OS)
+	}{
+		{"CONVERSATIONS", func(m *OS) {
+			m.Sprout.Selected = "a"
+			m.Sprout.Transcript = []pioctl.Entry{{Role: "user", Text: "hello"}, {Role: "assistant", Text: "world"}}
+		}},
+		{"FILES", func(m *OS) { m.Sprout.Subnav = 1 }},
+		{"WORKFLOWS", func(m *OS) { m.Sprout.Subnav = 2 }},
+		{"PICKER", func(m *OS) { m.Sprout.Subnav, m.Sprout.Focus, m.Sprout.Picker = 1, "picker", 1 }},
+		{"MODEL", func(m *OS) { m.Sprout.Subnav, m.Sprout.Focus, m.Sprout.ModelDraft = 1, "model", model }},
+		{"HINTS", func(m *OS) { m.Sprout.Focus = "hints" }},
+	}
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		for _, view := range views {
+			m := sproutOS(fake)
+			m.Width, m.Height = size[0], size[1]
+			view.apply(m)
+			frame := ansi.Strip(m.renderSprout())
+			lines := strings.Split(frame, "\n")
+			if len(lines) != size[1] {
+				t.Fatalf("%s %dx%d lines=%d", view.name, size[0], size[1], len(lines))
+			}
+			for _, line := range lines {
+				if lipgloss.Width(line) > size[0] {
+					t.Fatalf("%s %dx%d overflow %q", view.name, size[0], size[1], line)
+				}
+			}
+			t.Logf("--- %s %dx%d ---\n%s", view.name, size[0], size[1], frame)
+		}
 	}
 }

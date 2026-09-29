@@ -1,0 +1,1 @@
+{"id":1,"ok":true,"result":[{"number":3,"generation":3,"key":"host:pricing","kind":"implement","taskId":"ship-pricing-page","state":"running","startedAt":"2026-09-29T10:10:27.329Z","output":["building pricing page","waiting for preview"]}]}
