@@ -109,6 +109,17 @@ type CommandPaletteItem struct {
 // GetCommandPaletteItems returns all available commands for the command palette.
 func GetCommandPaletteItems(s *config.Settings) []CommandPaletteItem {
 	return []CommandPaletteItem{
+		{Name: "Open Sprout", Category: "View", Action: func(m *OS) (*OS, tea.Cmd) {
+			if m.ShowSprout {
+				m.CloseSprout()
+				return m, nil
+			}
+			return m, m.OpenSprout()
+		}},
+		{Name: "Leave Sprout", Category: "View", Action: func(m *OS) (*OS, tea.Cmd) {
+			m.CloseSprout()
+			return m, nil
+		}},
 		// The launcher is its own overlay, and this is the row that opens it.
 		// It is the bridge that keeps "one box finds everything" true as an
 		// entry point without the two lists having to be ranked against each

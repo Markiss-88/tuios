@@ -648,7 +648,8 @@ type KeybindingsConfig struct {
 	// not, through GetInboxAction. The digits 1 to 9 are not in it: they
 	// answer a held approval or a question by its number, which is the number
 	// the prompt itself shows. See getDefaultInboxKeybinds.
-	Inbox map[string][]string `toml:"inbox"`
+	Inbox  map[string][]string `toml:"inbox"`
+	Sprout map[string][]string `toml:"sprout"`
 	// InboxPeek binds are live while a prompt is open over the Inbox and its
 	// text line is not. A scope of its own because d dismisses in the list and
 	// denies in the peek.
@@ -913,7 +914,8 @@ func DefaultConfig() *UserConfig {
 				"prefix_mail": {"M"},
 				// i for the Inbox, the key the rail already uses for mail. The
 				// Inbox is everything waiting for the person in every session.
-				"prefix_inbox": {"i"},
+				"prefix_inbox":  {"i"},
+				"prefix_sprout": {"g"},
 				// o for the oldest item that needs you. a would have been the
 				// obvious letter and is the launcher's, which on macOS is the
 				// only way into it. The prefix stays armed after it, so o o o
@@ -1018,6 +1020,7 @@ func DefaultConfig() *UserConfig {
 			SidebarFiles:  getDefaultSidebarFilesKeybinds(),
 			SidebarAgents: getDefaultSidebarAgentsKeybinds(),
 			Inbox:         getDefaultInboxKeybinds(),
+			Sprout:        map[string][]string{"sprout_close": {"esc"}},
 			InboxPeek:     getDefaultInboxPeekKeybinds(),
 			Mail:          getDefaultMailKeybinds(),
 			Global: map[string][]string{
@@ -2412,6 +2415,10 @@ func fillMissingKeybinds(cfg, defaultCfg *UserConfig) {
 	// input path before these sections existed, so every config written
 	// before them has none and has to get the keys it always had.
 	fillMapDefaults(cfg.Keybindings.Inbox, defaultCfg.Keybindings.Inbox)
+	if cfg.Keybindings.Sprout == nil {
+		cfg.Keybindings.Sprout = map[string][]string{}
+	}
+	fillMapDefaults(cfg.Keybindings.Sprout, defaultCfg.Keybindings.Sprout)
 	fillMapDefaults(cfg.Keybindings.InboxPeek, defaultCfg.Keybindings.InboxPeek)
 	fillMapDefaults(cfg.Keybindings.Mail, defaultCfg.Keybindings.Mail)
 

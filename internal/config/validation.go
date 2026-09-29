@@ -106,6 +106,7 @@ func ValidateConfig(cfg *UserConfig) *ValidationResult {
 	validateSection("sidebar_files", cfg.Keybindings.SidebarFiles)
 	validateSection("sidebar_agents", cfg.Keybindings.SidebarAgents)
 	validateSection("inbox", cfg.Keybindings.Inbox)
+	validateSection("sprout", cfg.Keybindings.Sprout)
 	validateSection("inbox_peek", cfg.Keybindings.InboxPeek)
 	validateSection("mail", cfg.Keybindings.Mail)
 	validateSection("global", cfg.Keybindings.Global)

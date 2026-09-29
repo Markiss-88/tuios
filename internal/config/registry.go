@@ -38,7 +38,7 @@ type sectionMaps struct {
 	prefix, windowPrefix, minimizePrefix, workspacePrefix map[string]string
 	debugPrefix, tapePrefix, layoutPrefix                 map[string]string
 	terminalMode, global, script, sidebar, sidebarFiles   map[string]string
-	sidebarAgents, inbox, inboxPeek, mail                 map[string]string
+	sidebarAgents, inbox, inboxPeek, mail, sprout         map[string]string
 }
 
 // NewKeybindRegistry creates a new keybind registry from config
@@ -91,6 +91,7 @@ func (r *KeybindRegistry) buildMappings() {
 		inbox:           r.sectionKeyMap(kb.Inbox),
 		inboxPeek:       r.sectionKeyMap(kb.InboxPeek),
 		mail:            r.sectionKeyMap(kb.Mail),
+		sprout:          r.sectionKeyMap(kb.Sprout),
 	}
 }
 
@@ -224,6 +225,11 @@ func (r *KeybindRegistry) GetSidebarAgentsKeys(action string) []string {
 // GetInboxAction returns the action a key runs in the Inbox's list.
 func (r *KeybindRegistry) GetInboxAction(key string) string {
 	return r.lookupKey(key, r.sections.inbox)
+}
+
+// GetSproutAction returns an action while the Sprout frame owns the keyboard.
+func (r *KeybindRegistry) GetSproutAction(key string) string {
+	return r.lookupKey(key, r.sections.sprout)
 }
 
 // GetInboxPeekAction returns the action a key runs in the prompt open over

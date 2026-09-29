@@ -56,6 +56,7 @@ func (d *ActionDispatcher) registerPrefixHandlers() {
 	d.Register("prefix_jump_notif", handlePrefixJumpNotif)
 	d.Register("prefix_mail", handlePrefixMail)
 	d.Register("prefix_inbox", handlePrefixInbox)
+	d.Register("prefix_sprout", handlePrefixSprout)
 	d.Register("prefix_next_attention", handlePrefixNextAttention)
 	d.Register("prefix_review", handlePrefixReview)
 	d.Register("prefix_next_finished", handlePrefixNextFinished)
@@ -404,6 +405,14 @@ func handlePrefixNextFinished(_ tea.KeyPressMsg, o *app.OS) (*app.OS, tea.Cmd) {
 func handlePrefixSessionSwitcher(_ tea.KeyPressMsg, o *app.OS) (*app.OS, tea.Cmd) {
 	o.OpenSessionSwitcher()
 	return o, nil
+}
+
+func handlePrefixSprout(_ tea.KeyPressMsg, o *app.OS) (*app.OS, tea.Cmd) {
+	if o.ShowSprout {
+		o.CloseSprout()
+		return o, nil
+	}
+	return o, o.OpenSprout()
 }
 
 func handlePrefixWorkspaceSwitcher(_ tea.KeyPressMsg, o *app.OS) (*app.OS, tea.Cmd) {

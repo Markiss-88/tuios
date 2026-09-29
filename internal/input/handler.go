@@ -276,6 +276,9 @@ func HandleKeyPress(msg tea.KeyPressMsg, o *app.OS) (*app.OS, tea.Cmd) {
 	// the way by the key the layout produced (see readKey).
 	o.NoteHostKey(msg)
 	msg = readKey(msg)
+	if o.ShowSprout && !o.ShowSessionSwitcher {
+		return o, o.SproutHandleKey(msg.String())
+	}
 
 	// Capture the keypress for the showkeys overlay when it is enabled. This is
 	// the earliest shared point in the input path, before any mode routing or

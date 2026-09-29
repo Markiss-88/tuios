@@ -153,6 +153,11 @@ func reachSections(t *testing.T) []bindingSection {
 		// The Inbox, the prompt open over it and the mailbox own the keyboard
 		// while they are up, in either mode.
 		{name: "inbox", binds: k.Inbox, modes: bothModes, newOS: reachInboxOS},
+		{name: "sprout", binds: k.Sprout, modes: bothModes, newOS: func(t *testing.T) *app.OS {
+			o := reachOS(t)
+			o.ShowSprout = true
+			return o
+		}},
 		{name: "inbox_peek", binds: k.InboxPeek, modes: bothModes, newOS: reachInboxPeekOS},
 		{name: "mail", binds: k.Mail, modes: bothModes, newOS: reachMailOS},
 	}

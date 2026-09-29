@@ -70,6 +70,7 @@ const (
 	SectionSidebarFiles     = "sidebar_files"
 	SectionSidebarAgents    = "sidebar_agents"
 	SectionInbox            = "inbox"
+	SectionSprout           = "sprout"
 	SectionInboxPeek        = "inbox_peek"
 	SectionMail             = "mail"
 	SectionGlobal           = "global"
@@ -85,6 +86,7 @@ const (
 	ScopeSidebarFiles   = "sidebar.files"
 	ScopeSidebarAgents  = "sidebar.agents"
 	ScopeInbox          = "inbox"
+	ScopeSprout         = "sprout"
 	ScopeInboxPeek      = "inbox.peek"
 	ScopeMail           = "mail"
 	ScopePrefix         = "prefix"
@@ -165,6 +167,7 @@ func Scopes(leader string) []Scope {
 			Sections: []string{SectionInbox},
 			Reaches:  ReachModal,
 		},
+		{ID: ScopeSprout, Name: "Sprout", Sections: []string{SectionSprout}, Reaches: ReachModal},
 		{
 			ID: ScopeInboxPeek, Name: "Inbox prompt",
 			Sections: []string{SectionInboxPeek},
@@ -265,6 +268,8 @@ func (k *KeybindingsConfig) section(name string) map[string][]string {
 		return k.SidebarAgents
 	case SectionInbox:
 		return k.Inbox
+	case SectionSprout:
+		return k.Sprout
 	case SectionInboxPeek:
 		return k.InboxPeek
 	case SectionMail:

@@ -935,8 +935,10 @@ type OS struct {
 	AgentMail     AgentMailState
 	// The Inbox overlay and the mirror of the daemon's attention queue behind
 	// it. See inbox.go.
-	ShowInbox bool
-	Inbox     InboxState
+	ShowInbox  bool
+	Inbox      InboxState
+	ShowSprout bool
+	Sprout     SproutState
 	// inboxEvents carries what the Inbox watcher reads off the daemon, and
 	// stopInbox ends the watcher. Both nil until the watcher starts.
 	inboxEvents chan tea.Msg

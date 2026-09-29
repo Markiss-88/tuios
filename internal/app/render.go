@@ -883,6 +883,11 @@ func (m *OS) View() tea.View {
 	if m.crash != nil {
 		return m.crashView()
 	}
+	if m.ShowSprout && !m.ShowSessionSwitcher {
+		view.SetContent(m.renderSprout())
+		view.AltScreen = true
+		return view
+	}
 
 	// Fast path: return cached content when frame-skip determined nothing changed.
 	// This avoids the expensive GetCanvas → ultraviolet render pipeline on idle ticks.

@@ -178,6 +178,7 @@ func GetPrefixKeybindingGroups(prefixType string, isDaemonSession ...bool) []Key
 		sub("D", "Debug"),
 	}}
 	tools := KeybindingGroup{Title: "Tools", Bindings: []Keybinding{
+		kb("g", "Sprout"),
 		kb("P", "Command palette"),
 		kb("a", "Launcher"),
 		kb(",", "Settings"),
