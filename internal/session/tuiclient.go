@@ -157,6 +157,11 @@ type TUIClient struct {
 	focusSupported bool
 	hostFocus      atomic.Int32
 	focusMu        sync.Mutex
+	// treeOps says the daemon's welcome offered MsgLayoutTree. See
+	// LayoutTreeOps.
+	treeOps atomic.Bool
+	// attachGen counts attaches. See AttachGeneration.
+	attachGen atomic.Uint64
 	// viaHost is the host this client reached the daemon through, or "" for
 	// the daemon on this machine. See ConnectThroughHost.
 	viaHost             string
@@ -271,6 +276,8 @@ func (c *TUIClient) handshake(version string, width, height int, caps *ClientCap
 		hello.TerminalName = caps.TerminalName
 	}
 
+	hello.LayoutTreeOps = true
+
 	// Send hello with capabilities
 	msg, err := NewMessage(MsgHello, hello)
 	if err != nil {
@@ -326,6 +333,7 @@ func (c *TUIClient) handshake(version string, width, height int, caps *ClientCap
 	// turn a note into an outage.
 	c.noteDaemonBuild(version, welcome.Version)
 	c.focusSupported = welcome.ClientFocus
+	c.treeOps.Store(welcome.LayoutTreeOps)
 
 	// Seed the cache name-only; window summaries fill in on the first refresh.
 	infos := make([]SessionInfo, 0, len(welcome.SessionNames))
@@ -1077,6 +1085,44 @@ func (c *TUIClient) UpdateState(state *SessionState) error {
 	return nil
 }
 
+// LayoutTreeOps reports whether the daemon takes BSP trees as ops
+// (SendLayoutTree). When it does not, the trees travel in the state push, as
+// they did before the op existed.
+func (c *TUIClient) LayoutTreeOps() bool {
+	return c != nil && c.treeOps.Load()
+}
+
+// SendLayoutTree sends one workspace's tree to the daemon as an op. leaves names
+// the window each leaf number in tree stands for; nil tree says the workspace
+// has none.
+//
+// The op is numbered in the same sequence as the state pushes, so every state
+// the daemon handed out before it landed reads as predating this client's own
+// push and is dropped (see PredatesOwnPush). That is what keeps a drag smooth:
+// the answers to the earlier steps of the drag arrive while later steps are in
+// flight, and none of them may put the divider back.
+func (c *TUIClient) SendLayoutTree(ws int, tree *SerializedBSPTree, leaves map[int]string) error {
+	c.pushMu.Lock()
+	defer c.pushMu.Unlock()
+	seq := c.pushSeq.Load() + 1
+	p := &LayoutTreePayload{PushSeq: seq, Workspace: ws, Tree: tree, Leaves: leaves}
+	if origin := c.pushOrigin.Load(); origin != nil {
+		p.PushOrigin = *origin
+	}
+	msg, err := NewMessage(MsgLayoutTree, p)
+	if err != nil {
+		return err
+	}
+	if len(msg.Payload) > maxStateUpdateBytes {
+		return &FrameTooLargeError{Type: MsgLayoutTree, Size: uint32(len(msg.Payload)) + 2, Limit: uint32(maxStateUpdateBytes) + 2}
+	}
+	if err := c.send(msg); err != nil {
+		return err
+	}
+	c.pushSeq.Store(seq)
+	return nil
+}
+
 // startPushes gives this client a fresh name for its pushes and starts their
 // count over. It runs on every attach: the count is measured against the
 // attached session's table, and that table has never heard this name.
@@ -1090,6 +1136,18 @@ func (c *TUIClient) startPushes() {
 	defer c.pushMu.Unlock()
 	c.pushOrigin.Store(&origin)
 	c.pushSeq.Store(0)
+	c.attachGen.Add(1)
+}
+
+// AttachGeneration counts this client's attaches. SnapshotSeq numbers are the
+// attached session's own and start over in another session or after a daemon
+// restart, both of which take a new attach, so two snapshots are comparable by
+// SnapshotSeq only when they arrived under the same generation.
+func (c *TUIClient) AttachGeneration() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.attachGen.Load()
 }
 
 // AcceptState reports whether a session state that arrived from the daemon

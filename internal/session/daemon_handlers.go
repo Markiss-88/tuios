@@ -13,6 +13,16 @@ func (d *Daemon) handleHello(cs *connState, msg *Message) error {
 	}
 
 	cs.hello = &payload
+	cs.mu.Lock()
+	changed := cs.treeOps != payload.LayoutTreeOps
+	cs.treeOps = payload.LayoutTreeOps
+	attachedTo := cs.sessionID
+	cs.mu.Unlock()
+	// A second hello on an attached connection can change what the client
+	// sends, and with it what the session can run.
+	if changed && attachedTo != "" {
+		d.refreshTreeOps(attachedTo)
+	}
 
 	// Refuse a client this daemon cannot serve before it can attach to anything.
 	if protocolMismatch(payload.Protocol) {
@@ -49,6 +59,8 @@ func (d *Daemon) handleHello(cs *connState, msg *Message) error {
 		Codec:        wireCodecName,
 		Protocol:     ProtocolVersion,
 		ClientFocus:  true,
+		// See layout_tree.go.
+		LayoutTreeOps: true,
 	})
 }
 
@@ -141,6 +153,7 @@ func (d *Daemon) handleAttach(cs *connState, msg *Message) error {
 		}
 	}
 	cs.mu.Lock()
+	previousSession := cs.sessionID
 	cs.sessionID = session.ID
 	cs.width = payload.Width
 	cs.height = payload.Height
@@ -208,6 +221,13 @@ func (d *Daemon) handleAttach(cs *connState, msg *Message) error {
 	// already holds it, and this client does not: it holds the snapshot below.
 	// Dropped before the snapshot, every state that changes after the snapshot
 	// is broadcast, and so either reaches this client or marks it as missed.
+	// Whether the session's clients send their trees as ops, with this client
+	// counted. Settled before the snapshot, so the reply says what is in force.
+	// A client that moved here without a detach no longer counts where it was.
+	d.refreshTreeOps(session.ID)
+	if previousSession != "" && previousSession != session.ID {
+		d.refreshTreeOps(previousSession)
+	}
 	session.forgetBroadcast()
 	state := session.GetState()
 	if hook := attachSnapshotTaken.Load(); hook != nil {
@@ -638,6 +658,64 @@ func (d *Daemon) forgetPushes(cs *connState, sessionID string) {
 	if session := d.manager.GetSessionByID(sessionID); session != nil {
 		session.ForgetPush(origin)
 	}
+	// A client that leaves may have been the one holding the ops off.
+	d.refreshTreeOps(sessionID)
+}
+
+// refreshTreeOps turns the session's tree ops on while every TUI client
+// attached to it sends them, and off while any does not. A client too old for
+// ops sends its trees in its pushes and reads trees only from those, so a
+// current client beside it has to do the same, or the two keep two trees.
+// A client still attaching is counted: it is about to be handed a snapshot
+// that has to say what is in force.
+func (d *Daemon) refreshTreeOps(sessionID string) {
+	session := d.manager.GetSessionByID(sessionID)
+	if session == nil {
+		return
+	}
+	// Held from the count to the change. A detach that counted "no older
+	// client" and then applied it after an older client's attach had applied
+	// "off" left the ops on beside a client that cannot send them.
+	session.treeOpsMu.Lock()
+	defer session.treeOpsMu.Unlock()
+	on := true
+	d.clientsMu.RLock()
+	for _, cs := range d.clients {
+		cs.mu.Lock()
+		if cs.sessionID == sessionID && cs.isTUIClient && !cs.treeOps {
+			on = false
+		}
+		cs.mu.Unlock()
+	}
+	d.clientsMu.RUnlock()
+	if hook := treeOpsCounted.Load(); hook != nil {
+		(*hook)()
+	}
+	session.SetLayoutTreeOps(on)
+}
+
+// treeOpsCounted runs in refreshTreeOps between the count and the change. It
+// is unset outside tests, which use it to widen that window on purpose.
+var treeOpsCounted atomic.Pointer[func()]
+
+// notePushOrigin records the name cs gives its pushes and layout ops. The
+// count itself is recorded by the session with the change it makes (see
+// notePushLocked), or by NotePush for a push that is refused. See
+// SessionState.PushSeen.
+func (d *Daemon) notePushOrigin(cs *connState, session *Session, origin string) {
+	if origin == "" || len(origin) > maxPushOriginLen {
+		return
+	}
+	cs.mu.Lock()
+	prev := cs.pushOrigin
+	cs.pushOrigin = origin
+	cs.mu.Unlock()
+	// One entry per connection: a client names its pushes afresh only on
+	// attach, and a connection that kept changing the name must not grow
+	// the table every state carries.
+	if prev != "" && prev != origin {
+		session.ForgetPush(prev)
+	}
 }
 
 func (d *Daemon) handleUpdateState(cs *connState, msg *Message) error {
@@ -658,24 +736,14 @@ func (d *Daemon) handleUpdateState(cs *connState, msg *Message) error {
 	// counts every push it sends, and PushSeen has to agree with it. See
 	// SessionState.PushSeen. A name longer than any client makes is not one,
 	// and is not let into a table every state carries.
-	if state.PushOrigin != "" && len(state.PushOrigin) <= maxPushOriginLen {
-		cs.mu.Lock()
-		prev := cs.pushOrigin
-		cs.pushOrigin = state.PushOrigin
-		cs.mu.Unlock()
-		// One entry per connection: a client names its pushes afresh only on
-		// attach, and a connection that kept changing the name must not grow
-		// the table every state carries.
-		if prev != "" && prev != state.PushOrigin {
-			session.ForgetPush(prev)
-		}
-		session.NotePush(state.PushOrigin, state.PushSeq)
-	}
+	d.notePushOrigin(cs, session, state.PushOrigin)
 	// Before anything that walks the layout trees by recursion (the merge,
 	// the fingerprint, the save, the rebroadcast) sees them. See
 	// wire_bounds.go.
 	if err := validateSessionState(&state); err != nil {
 		LogError("Refused a state update from %s: %v", cs.clientID, err)
+		// Counted all the same: the client counts every push it sends.
+		session.NotePush(state.PushOrigin, state.PushSeq)
 		return d.sendError(cs, ErrCodeInvalidMessage, "state update refused: "+err.Error())
 	}
 	clampPushedText(&state)
@@ -686,7 +754,7 @@ func (d *Daemon) handleUpdateState(cs *connState, msg *Message) error {
 	// is this client's own, and it is what the panes' emulators answer OSC 11
 	// and OSC 10 with. See report_colors.go.
 	reportBg, reportFg, reportPal := state.PaneReportBg, state.PaneReportFg, state.PaneReportPalette
-	accepted := session.UpdateStateFrom(&state, d.mayActAsHuman(cs))
+	accepted, behind := session.updateStateFrom(&state, d.mayActAsHuman(cs))
 	session.applyReportColors(reportBg, reportFg, reportPal)
 
 	// The merged state is a full copy of the session's, retitled from every
@@ -705,7 +773,12 @@ func (d *Daemon) handleUpdateState(cs *connState, msg *Message) error {
 	// what is canonical now is not what this client pushed. Send the merged state
 	// straight back: without it the client keeps rendering its stale view and
 	// pushes it again on the next sync.
-	if !accepted {
+	//
+	// A push that was accepted but built before a tree op it had not seen is
+	// answered the same way. The op's own broadcast reached this client before
+	// the push landed, so the client dropped it as older than the push, and
+	// nothing else would ever tell it about that tree.
+	if !accepted || behind {
 		if err := d.sendMessage(cs, MsgStateSync, &StateSyncPayload{
 			State:       mergedState(),
 			TriggerType: "reconcile",

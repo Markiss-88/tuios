@@ -116,6 +116,10 @@ const (
 	// only to a daemon whose welcome set ClientFocus, so an older daemon never
 	// receives a type it would refuse. See client_focus.go.
 	MsgClientFocus
+	// MsgLayoutTree carries one workspace's BSP tree as a client just shaped
+	// it, as an op the daemon applies and versions. A client sends it only to
+	// a daemon whose welcome set LayoutTreeOps. See layout_tree.go.
+	MsgLayoutTree
 )
 
 // HostsChangedPayload names the change behind a MsgHostsChanged push.
@@ -160,6 +164,11 @@ type HelloPayload struct {
 	// gob ignores a field the peer does not know, so silence here is age, not
 	// disagreement.
 	Protocol int `json:"protocol,omitempty"`
+	// LayoutTreeOps says the client sends BSP trees as MsgLayoutTree ops. A
+	// client that predates the op leaves it false, and while such a client is
+	// attached to a session the daemon turns the ops off for every client
+	// there. See Session.SetLayoutTreeOps.
+	LayoutTreeOps bool `json:"layout_tree_ops,omitempty"`
 }
 
 // WelcomePayload is sent by server in response to Hello.
@@ -173,6 +182,10 @@ type WelcomePayload struct {
 	// ClientFocus says the daemon reads MsgClientFocus. gob leaves it false
 	// from a daemon that predates it, and the client then sends none.
 	ClientFocus bool `json:"client_focus,omitempty"`
+	// LayoutTreeOps says the daemon reads MsgLayoutTree. A client that sees it
+	// false (a daemon that predates it) keeps sending its trees inside its
+	// state pushes, which is what every client did before.
+	LayoutTreeOps bool `json:"layout_tree_ops,omitempty"`
 }
 
 // AttachPayload requests attachment to a session.

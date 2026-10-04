@@ -477,6 +477,14 @@ type SessionState struct {
 	// TUIClient.PredatesOwnPush. Wire only: it is about connections, which do
 	// not survive a restart, so it is never saved.
 	PushSeen map[string]uint64 `json:"-"`
+	// LayoutTreeOps says whether the session's clients send their BSP trees as
+	// ops (true) or inside their pushes, as before the op existed (false). The
+	// daemon turns the ops off while a client too old for them is attached
+	// and on again when it leaves, and it changes the flag as a mutation, so
+	// every client switches at one Version. A daemon that predates the ops
+	// never sets it; a client reads it only from a daemon whose welcome
+	// offered them. Wire only.
+	LayoutTreeOps bool `json:"-"`
 	// SnapshotSeq numbers the copies of the state the session hands out, in
 	// the order they were taken. A copy is taken under the state lock and sent
 	// after it is released, and the daemon sends from more than one goroutine
@@ -945,6 +953,19 @@ type Session struct {
 	// Version, so a move by one client is invisible to focusMovedVersion, and a
 	// stale push from another client built at that version may predate it.
 	clientFocusMoved map[string]int
+	// treeOps holds the recent Versions that were tree ops, with the client
+	// connection that sent each, at its version modulo the length, guarded by
+	// stateMu. A fixed ring, so it never grows. See missedMutationLocked and
+	// missedPeerTreeLocked.
+	treeOps [1024]treeOpRecord
+	// treeOpsOff is set while a client too old for tree ops is attached.
+	// Guarded by stateMu. See SetLayoutTreeOps.
+	treeOpsOff bool
+	// treeOpsMu is held across working out whether the session's tree ops
+	// should be on and applying the answer, so two refreshes cannot apply
+	// their answers in the opposite order to the one they worked them out
+	// in. See Daemon.refreshTreeOps.
+	treeOpsMu sync.Mutex
 	// focusIntent is set by a focus verb inside mutateState, so the mutation
 	// counts as a focus move even when the focus it names is the one already
 	// held: the verb is a later intent than any push in flight.
@@ -1895,6 +1916,7 @@ func (s *Session) snapshotStateLocked() *SessionState {
 		stateCopy.WorkspaceHasCustom = maps.Clone(s.state.WorkspaceHasCustom)
 	}
 	stateCopy.PushSeen = maps.Clone(s.pushSeen)
+	stateCopy.LayoutTreeOps = !s.treeOpsOff
 	// Taken under the state lock, so a copy with a higher number shows the
 	// state at least as late as one with a lower number.
 	stateCopy.SnapshotSeq = s.snapSeq.Add(1)
@@ -2036,7 +2058,8 @@ func (s *Session) ResurrectionState() *SessionState {
 // incoming snapshot carries the daemon Version the client last saw. When that
 // version is current the client has seen everything the daemon did and its
 // snapshot is taken as sent. When it is behind, the client built its snapshot
-// before a daemon-side mutation it has never seen, and the fields the daemon
+// before a daemon-side mutation it has never seen (a layout op the same client
+// sent by any client does not count: see missedMutationLocked), and the fields the daemon
 // owns are restored on top of it rather than being silently undone. Fields no
 // client ever sets (Options, Cwd, ResurrectionVersion) are carried over either
 // way.
@@ -2059,11 +2082,20 @@ func (s *Session) UpdateState(state *SessionState) bool {
 // counts every push it sent, and a refused one that was never counted here
 // would leave it taking every later broadcast for an older one.
 func (s *Session) NotePush(origin string, seq uint64) {
-	if origin == "" || seq == 0 {
-		return
-	}
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	s.notePushLocked(origin, seq)
+}
+
+// notePushLocked is NotePush for a caller that holds stateMu. A push or an op
+// that changes the state is counted here, inside the same critical section as
+// the change, so no snapshot can say the daemon has seen push k while showing
+// the state from before it. A client that trusted such a snapshot took an old
+// tree over the op it had just sent.
+func (s *Session) notePushLocked(origin string, seq uint64) {
+	if origin == "" || seq == 0 || len(origin) > maxPushOriginLen {
+		return
+	}
 	if s.pushSeen == nil {
 		s.pushSeen = make(map[string]uint64)
 	}
@@ -2089,19 +2121,31 @@ func (s *Session) ForgetPush(origin string) {
 // finished turn seen: a client running inside a pane is an agent looking, and
 // finished_unread is about whether the person has. See human_origin.go.
 func (s *Session) UpdateStateFrom(state *SessionState, seen bool) bool {
+	accepted, _ := s.updateStateFrom(state, seen)
+	return accepted
+}
+
+// updateStateFrom is UpdateStateFrom that also reports whether the push was
+// built before a tree op another client sent. Such a push is accepted, because
+// it cannot undo a tree op (see missedMutationLocked). But the client that
+// sent it has not seen that tree, and a client is never sent its own push
+// back, so the caller answers it with the session's state.
+func (s *Session) updateStateFrom(state *SessionState, seen bool) (accepted, behind bool) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 
-	// The push's name has been recorded by NotePush, and the table it goes into
-	// lives beside the state, not in it. The origin is also what tells one
-	// client's focus move from another's, below.
+	// The push is counted here, with the change it makes. The table it goes
+	// into lives beside the state, not in it. The origin is also what tells
+	// one client's focus move from another's, below.
 	origin := state.PushOrigin
+	s.notePushLocked(origin, state.PushSeq)
 	state.PushOrigin, state.PushSeq, state.PushSeen, state.SnapshotSeq = "", 0, nil, 0
 
-	accepted := true
+	accepted = true
 	prev := s.state
 	if prev != nil {
-		if state.BaseVersion != 0 && state.BaseVersion < prev.Version {
+		behind = state.BaseVersion != 0 && s.missedPeerTreeLocked(origin, state.BaseVersion, prev.Version)
+		if state.BaseVersion != 0 && s.missedMutationLocked(state.BaseVersion, prev.Version) {
 			mine := focusViewOf(state)
 			reconcileStale(state, prev, s.hasLivePTY)
 			if s.pushOwnsFocusLocked(origin, state.BaseVersion) {
@@ -2116,6 +2160,14 @@ func (s *Session) UpdateStateFrom(state *SessionState, seen bool) bool {
 		// snapshot carries it forward unchanged: the client is not telling the
 		// daemon anything the daemon did not already know.
 		state.Version = prev.Version
+		// A push from a client too old for tree ops carries its trees and is
+		// taken as sent, without a version, as before. It is not answered to
+		// the other clients. Counting it as a tree op (a version, or a reply
+		// owed to every other client) was measured: with a v0.8.0 client the
+		// pair ended on different screens in 60 to 76 rounds of 150, against
+		// 0 without it, because the reply handed the current client the older
+		// client's tree after the older client had already taken the current
+		// one. A pair with a v0.8.0 client stays last-writer-wins.
 	}
 	state.BaseVersion = 0
 
@@ -2141,7 +2193,7 @@ func (s *Session) UpdateStateFrom(state *SessionState, seen bool) bool {
 	s.TouchActive()
 	s.stateDirty.Store(true)
 	s.emitLifecycleLocked(before)
-	return accepted
+	return accepted, behind
 }
 
 // pushOwnsFocusLocked reports whether a stale push from origin, built at base,
@@ -2202,6 +2254,7 @@ func (s *Session) mutateStateLocked(fn func(state *SessionState) error) (*Sessio
 	}
 	s.noteAgentTurnsLocked(before, time.Now().UnixNano())
 	clearNowAtRestLocked(before, s.state)
+	pruneDeadLeaves(s.state)
 	// A daemon-side mutation is exactly what a client sync must not undo, so it
 	// is what advances the version. A client that pushes a snapshot built before
 	// this point is reconciled by UpdateState rather than winning by arriving

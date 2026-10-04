@@ -49,7 +49,7 @@ func (m *OS) WireDaemonClient(client *session.TUIClient) {
 	})
 	client.OnStateSync(func(state *session.SessionState, triggerType, sourceID string) {
 		clientLog("State sync: trigger=%s, source=%s", triggerType, shortID(sourceID))
-		if m.QueueStateSync(StateSyncMsg{State: state, TriggerType: triggerType, SourceID: sourceID}) {
+		if m.QueueStateSync(StateSyncMsg{State: state, TriggerType: triggerType, SourceID: sourceID, Attach: client.AttachGeneration()}) {
 			clientLog("StateSyncChan full, superseded the queued snapshot")
 		}
 	})
@@ -189,6 +189,11 @@ func (m *OS) adoptEmptySessionVersion(state *session.SessionState) {
 	if state != nil {
 		m.DaemonStateVersion = state.Version
 	}
+	// The session holds no tree this client has heard of, so whatever tree it
+	// builds from here on is news.
+	m.treeSeen = nil
+	m.treeDerived = nil
+	m.sessionTreeOpsOff = state != nil && !state.LayoutTreeOps
 }
 
 // rehydrateWindows wires the restored windows to their daemon PTYs and lays
