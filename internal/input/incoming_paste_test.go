@@ -108,3 +108,24 @@ func TestIncomingPasteRewrapsWhenBracketedPasteEnabled(t *testing.T) {
 		t.Error("bracketed incoming paste must still be silent")
 	}
 }
+
+func TestSproutTextBoxesTakeSanitizedPaste(t *testing.T) {
+	for _, focus := range []string{"composer", "model"} {
+		t.Run(focus, func(t *testing.T) {
+			o, sent := pasteHarness(t, false)
+			o.ShowSprout = true
+			o.Sprout.Focus = focus
+			_, _ = HandleInput(tea.PasteMsg{Content: "Tidy\tthe\nREADME\x00"}, o)
+			got := o.Sprout.Composer
+			if focus == "model" {
+				got = o.Sprout.ModelDraft
+			}
+			if got != "Tidythe README" {
+				t.Errorf("Sprout %s = %q, want sanitized paste", focus, got)
+			}
+			if got := sent.String(); got != "" {
+				t.Errorf("PTY received %q while Sprout editor owned paste", got)
+			}
+		})
+	}
+}

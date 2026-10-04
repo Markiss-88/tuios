@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -272,7 +273,7 @@ func (m *OS) selectSproutSession(id string) tea.Cmd {
 func (m *OS) sproutStartSendCmd() tea.Cmd {
 	s := &m.Sprout
 	s.stream++
-	stream, gen, session, text, client := s.stream, s.gen, s.Selected, s.Composer, s.client
+	stream, gen, session, text, client := s.stream, s.gen, s.Selected, s.pendingText, s.client
 	ch := make(chan SproutStreamMsg)
 	return func() tea.Msg {
 		go func() {
@@ -405,9 +406,9 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 				if s.pendingUser >= 0 && s.pendingUser < len(s.Transcript) {
 					s.Transcript = append(s.Transcript[:s.pendingUser], s.Transcript[s.pendingUser+1:]...)
 				}
+				s.Composer = s.pendingText
 				if errors.Is(x.Err, pioctl.ErrUnreachable) {
 					s.Status = "pio: unreachable"
-					s.Composer = s.pendingText
 				} else {
 					s.Status = "pio: " + x.Err.Error()
 				}
@@ -452,6 +453,9 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 	s := &m.Sprout
 	if s.Focus == "" {
 		s.Focus = "sidebar"
+	}
+	if key == "space" && (s.Focus == "composer" || s.Focus == "model") {
+		key = " "
 	}
 	if s.Focus == "composer" {
 		switch key {
@@ -641,4 +645,29 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 		s.Focus = "hints"
 	}
 	return nil
+}
+
+// SproutPaste appends one-line paste text to the focused Sprout editor.
+func (m *OS) SproutPaste(text string) {
+	s := &m.Sprout
+	var b strings.Builder
+	newline := false
+	for _, r := range text {
+		switch {
+		case r == '\n' || r == '\r':
+			if !newline {
+				b.WriteByte(' ')
+			}
+			newline = true
+		case unicode.IsControl(r):
+		default:
+			b.WriteRune(r)
+			newline = false
+		}
+	}
+	if s.Focus == "composer" {
+		s.Composer += b.String()
+	} else if s.Focus == "model" {
+		s.ModelDraft += b.String()
+	}
 }

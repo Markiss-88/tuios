@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,8 @@ type fakeSproutClient struct {
 	harness                                                       pioctl.HarnessResult
 	tasksErr, goalsErr, jobsErr, taskErr, goalErr, harnessErr     error
 	setHarness                                                    [][2]string
+	sends                                                         [][2]string
+	taskTitles, goalTitles                                        []string
 	sessionsCalls, configCalls, tasksCalls, goalsCalls, jobsCalls int
 }
 
@@ -62,10 +65,12 @@ func (f *fakeSproutClient) Jobs(context.Context, bool) ([]pioctl.Job, error) {
 	f.jobsCalls++
 	return f.jobs, f.jobsErr
 }
-func (f *fakeSproutClient) CreateTask(context.Context, string) (pioctl.Task, error) {
+func (f *fakeSproutClient) CreateTask(_ context.Context, title string) (pioctl.Task, error) {
+	f.taskTitles = append(f.taskTitles, title)
 	return f.task, f.taskErr
 }
-func (f *fakeSproutClient) CreateGoal(context.Context, string) (pioctl.Goal, error) {
+func (f *fakeSproutClient) CreateGoal(_ context.Context, title string) (pioctl.Goal, error) {
+	f.goalTitles = append(f.goalTitles, title)
 	return f.goal, f.goalErr
 }
 func (f *fakeSproutClient) SetHarness(_ context.Context, name, model string) (pioctl.HarnessResult, error) {
@@ -75,7 +80,8 @@ func (f *fakeSproutClient) SetHarness(_ context.Context, name, model string) (pi
 func (f *fakeSproutClient) History(_ context.Context, id string, _ int) ([]pioctl.Entry, int, error) {
 	return f.history[id], 0, nil
 }
-func (f *fakeSproutClient) Send(_ context.Context, _ string, _ string, event func(json.RawMessage)) (pioctl.ChatResult, error) {
+func (f *fakeSproutClient) Send(_ context.Context, session, text string, event func(json.RawMessage)) (pioctl.ChatResult, error) {
+	f.sends = append(f.sends, [2]string{session, text})
 	for _, e := range f.events {
 		event(e)
 	}
@@ -89,6 +95,16 @@ func driveSprout(t *testing.T, m *OS, cmd tea.Cmd) {
 	t.Helper()
 	for cmd != nil {
 		cmd = m.handleSproutMsg(cmd())
+	}
+}
+
+func sproutType(m *OS, text string) {
+	for _, r := range text {
+		msg := tea.KeyPressMsg{Code: r, Text: string(r)}
+		if r == ' ' {
+			msg = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+		}
+		m.SproutHandleKey(msg.String())
 	}
 }
 
@@ -170,6 +186,59 @@ func TestSproutSendStreamsOneAssistantAndErrorTurn(t *testing.T) {
 	}
 }
 
+func TestSproutTextEntryUsesRealKeyMessages(t *testing.T) {
+	space := tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+	if got := space.String(); got != "space" {
+		t.Fatalf("space key string = %q", got)
+	}
+
+	t.Run("composer", func(t *testing.T) {
+		fake := &fakeSproutClient{send: pioctl.ChatResult{OK: true}}
+		m := sproutOS(fake)
+		m.Sprout.Selected, m.Sprout.Focus = "session-7", "composer"
+		sproutType(m, "What is 7 times 6?")
+		driveSprout(t, m, m.SproutHandleKey((tea.KeyPressMsg{Code: tea.KeyEnter}).String()))
+		if got, want := fake.sends, [][2]string{{"session-7", "What is 7 times 6?"}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("Send calls = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("task and goal", func(t *testing.T) {
+		fake := &fakeSproutClient{}
+		m := sproutOS(fake)
+		m.Sprout.Subnav, m.Sprout.Focus = 1, "composer"
+		sproutType(m, "Tidy the README")
+		driveSprout(t, m, m.SproutHandleKey((tea.KeyPressMsg{Code: tea.KeyEnter}).String()))
+		if got, want := fake.taskTitles, []string{"Tidy the README"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CreateTask titles = %#v, want %#v", got, want)
+		}
+		m.Sprout.Subnav, m.Sprout.Focus = 2, "composer"
+		sproutType(m, "Ship the docs")
+		driveSprout(t, m, m.SproutHandleKey((tea.KeyPressMsg{Code: tea.KeyEnter}).String()))
+		if got, want := fake.goalTitles, []string{"Ship the docs"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("CreateGoal titles = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("model", func(t *testing.T) {
+		fake := &fakeSproutClient{harness: pioctl.HarnessResult{Name: "codex", Model: "model-x"}}
+		m := sproutOS(fake)
+		m.Sprout.Config.Harness.Name = "codex"
+		m.SproutHandleKey("m")
+		sproutType(m, "model-x")
+		driveSprout(t, m, m.SproutHandleKey((tea.KeyPressMsg{Code: tea.KeyEnter}).String()))
+		if got, want := fake.setHarness, [][2]string{{"codex", "model-x"}}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("SetHarness calls = %#v, want %#v", got, want)
+		}
+		m.Sprout.Config.Harness.Model = ""
+		m.SproutHandleKey("m")
+		sproutType(m, "model x")
+		if got := m.Sprout.ModelDraft; got != "model x" {
+			t.Fatalf("model draft = %q, want space retained", got)
+		}
+	})
+}
+
 func TestSproutDropsStaleReplyAndMarksOtherSessionUnread(t *testing.T) {
 	m := sproutOS(&fakeSproutClient{history: map[string][]pioctl.Entry{"b": nil}})
 	m.Sprout.Selected, m.Sprout.gen, m.Sprout.stream = "a", 1, 1
@@ -195,7 +264,7 @@ func TestSproutRejectAndUnreachableKeepTranscriptSafe(t *testing.T) {
 		err                      error
 		wantStatus, wantComposer string
 	}{
-		{"rejected", &pioctl.RequestError{Code: "not_found", Message: "gone"}, "pio: not_found: gone", ""},
+		{"rejected", &pioctl.RequestError{Code: "not_found", Message: "gone"}, "pio: not_found: gone", "hello"},
 		{"unreachable", pioctl.ErrUnreachable, "pio: unreachable", "hello"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

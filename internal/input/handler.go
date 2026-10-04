@@ -179,6 +179,10 @@ func HandleInput(msg tea.Msg, o *app.OS) (tea.Model, tea.Cmd) {
 // terminal's bracketed paste (tea.PasteMsg) and the paste key's clipboard read
 // (tea.ClipboardMsg), so neither path can reach a pane the other protects.
 func pasteTakenByOverlay(o *app.OS, content string) bool {
+	if o.ShowSprout && (o.Sprout.Focus == "composer" || o.Sprout.Focus == "model") {
+		o.SproutPaste(content)
+		return true
+	}
 	// While the Inbox's reply editor is open the paste is the reply's text,
 	// one line of it.
 	if o.InboxReplyOpen() {
