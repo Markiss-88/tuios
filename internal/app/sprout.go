@@ -312,7 +312,7 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 		if s.Selected == "" {
 			for _, session := range s.Sessions {
 				if session.Active {
-					return m.selectSproutSession(session.ID)
+					return tea.Batch(m.selectSproutSession(session.ID), m.sproutTick())
 				}
 			}
 		}
@@ -335,7 +335,7 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			s.Status = "pio: " + x.Err.Error()
 			return nil
 		}
-		return m.selectSproutSession(x.Session.ID)
+		return tea.Batch(m.selectSproutSession(x.Session.ID), m.sproutTick())
 	case SproutBoardMsg:
 		if x.Gen != s.gen || !m.ShowSprout {
 			return nil
@@ -618,7 +618,7 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 		}
 	case "enter":
 		if sessions := s.visibleSessions(); s.Focus == "sidebar" && s.Cursor < len(sessions) {
-			return m.selectSproutSession(sessions[s.Cursor].ID)
+			return tea.Batch(m.selectSproutSession(sessions[s.Cursor].ID), m.sproutTick())
 		}
 	case "n":
 		if s.Subnav == 0 {

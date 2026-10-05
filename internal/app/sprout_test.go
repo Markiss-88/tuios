@@ -18,6 +18,7 @@ import (
 
 type fakeSproutClient struct {
 	sessions                                                      []pioctl.Session
+	sessionsByCall                                                [][]pioctl.Session
 	history                                                       map[string][]pioctl.Entry
 	switched                                                      []string
 	created                                                       pioctl.Session
@@ -25,6 +26,7 @@ type fakeSproutClient struct {
 	sendErr                                                       error
 	events                                                        []json.RawMessage
 	tasks                                                         []pioctl.Task
+	tasksByCall                                                   [][]pioctl.Task
 	goals                                                         []pioctl.Goal
 	jobs                                                          []pioctl.Job
 	config                                                        pioctl.Config
@@ -40,6 +42,9 @@ type fakeSproutClient struct {
 
 func (f *fakeSproutClient) Sessions(context.Context) ([]pioctl.Session, error) {
 	f.sessionsCalls++
+	if i := f.sessionsCalls - 1; i < len(f.sessionsByCall) {
+		return f.sessionsByCall[i], nil
+	}
 	return f.sessions, nil
 }
 func (f *fakeSproutClient) Create(context.Context, string) (pioctl.Session, error) {
@@ -55,6 +60,9 @@ func (f *fakeSproutClient) GetConfig(context.Context) (pioctl.Config, error) {
 }
 func (f *fakeSproutClient) Tasks(context.Context, string) ([]pioctl.Task, error) {
 	f.tasksCalls++
+	if i := f.tasksCalls - 1; i < len(f.tasksByCall) {
+		return f.tasksByCall[i], f.tasksErr
+	}
 	return f.tasks, f.tasksErr
 }
 func (f *fakeSproutClient) Goals(context.Context, string) ([]pioctl.Goal, error) {
@@ -93,8 +101,164 @@ func sproutOS(client *fakeSproutClient) *OS {
 }
 func driveSprout(t *testing.T, m *OS, cmd tea.Cmd) {
 	t.Helper()
-	for cmd != nil {
-		cmd = m.handleSproutMsg(cmd())
+	var drive func(tea.Cmd)
+	drive = func(cmd tea.Cmd) {
+		if cmd == nil {
+			return
+		}
+		switch msg := cmd().(type) {
+		case tea.BatchMsg:
+			for _, child := range msg {
+				drive(child)
+			}
+		case SproutTickMsg:
+			// A tick starts the next periodic cycle; callers drive it explicitly.
+		default:
+			drive(m.handleSproutMsg(msg))
+		}
+	}
+	drive(cmd)
+}
+
+func sproutBatch(t *testing.T, cmd tea.Cmd) tea.BatchMsg {
+	t.Helper()
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("refresh result = %T, want tea.BatchMsg", msg)
+	}
+	return batch
+}
+
+func requireSproutTick(t *testing.T, m *OS, cmd tea.Cmd) {
+	t.Helper()
+	msg := cmd()
+	tick, ok := msg.(SproutTickMsg)
+	if !ok || tick.Gen != m.Sprout.gen {
+		t.Fatalf("tick = %#v, want SproutTickMsg{Gen: %d}", msg, m.Sprout.gen)
+	}
+}
+
+func TestSproutFirstRefreshSelectsAndRearmsTick(t *testing.T) {
+	fake := &fakeSproutClient{sessions: []pioctl.Session{{ID: "active", Active: true}}, history: map[string][]pioctl.Entry{"active": nil}}
+	m := sproutOS(fake)
+	m.Sprout.gen = 7
+	batch := sproutBatch(t, m.handleSproutMsg(SproutRefreshMsg{Sessions: fake.sessions, Gen: 7}))
+	if got := m.Sprout.Selected; got != "active" {
+		t.Fatalf("selected = %q", got)
+	}
+	ticks := 0
+	for _, cmd := range batch {
+		switch msg := cmd().(type) {
+		case SproutHistoryMsg:
+			if follow := m.handleSproutMsg(msg); follow != nil {
+				t.Fatalf("history follow-up = %T", follow())
+			}
+		case SproutTickMsg:
+			if msg.Gen != m.Sprout.gen {
+				t.Fatalf("tick generation = %d, want %d", msg.Gen, m.Sprout.gen)
+			}
+			ticks++
+		default:
+			t.Fatalf("batch message = %T", msg)
+		}
+	}
+	if ticks != 1 {
+		t.Fatalf("ticks = %d, want 1", ticks)
+	}
+}
+
+func TestSproutRefreshChainFollowsSessionsWithoutInput(t *testing.T) {
+	fake := &fakeSproutClient{
+		sessionsByCall: [][]pioctl.Session{
+			{{ID: "default", Active: true}, {ID: "first-turn-probe"}},
+			{{ID: "default"}, {ID: "first-turn-probe"}, {ID: "new-chat", Active: true}},
+		},
+		history: map[string][]pioctl.Entry{"default": nil},
+	}
+	m := sproutOS(fake)
+	batch := sproutBatch(t, m.handleSproutMsg(m.OpenSprout()()))
+	var tick SproutTickMsg
+	for _, cmd := range batch {
+		switch msg := cmd().(type) {
+		case SproutHistoryMsg:
+			if follow := m.handleSproutMsg(msg); follow != nil {
+				t.Fatalf("history follow-up = %T", follow())
+			}
+		case SproutTickMsg:
+			tick = msg
+		default:
+			t.Fatalf("batch message = %T", msg)
+		}
+	}
+	if tick.Gen != m.Sprout.gen {
+		t.Fatalf("tick generation = %d, want %d", tick.Gen, m.Sprout.gen)
+	}
+	refresh := m.handleSproutMsg(tick)
+	rearm := m.handleSproutMsg(refresh())
+	if got := len(m.Sprout.Sessions); got != 3 {
+		t.Fatalf("sessions = %d, want 3", got)
+	}
+	if !m.Sprout.Sessions[2].Active {
+		t.Fatalf("active sessions = %+v", m.Sprout.Sessions)
+	}
+	requireSproutTick(t, m, rearm)
+}
+
+func TestSproutBoardRefreshChainUpdatesTaskWithoutInput(t *testing.T) {
+	fake := &fakeSproutClient{tasksByCall: [][]pioctl.Task{{{ID: "task", Status: "todo"}}, {{ID: "task", Status: "done"}}}}
+	m := sproutOS(fake)
+	m.Sprout.gen = 1
+	driveSprout(t, m, m.SproutHandleKey("tab"))
+	if got := m.Sprout.Tasks[0].Status; got != "todo" {
+		t.Fatalf("initial status = %q", got)
+	}
+	batch := sproutBatch(t, m.handleSproutMsg(SproutTickMsg{Gen: 1}))
+	var rearm tea.Cmd
+	for _, cmd := range batch {
+		switch msg := cmd().(type) {
+		case SproutRefreshMsg:
+			rearm = m.handleSproutMsg(msg)
+		case SproutBoardMsg:
+			if follow := m.handleSproutMsg(msg); follow != nil {
+				t.Fatalf("board follow-up = %T", follow())
+			}
+		default:
+			t.Fatalf("batch message = %T", msg)
+		}
+	}
+	if got := m.Sprout.Tasks[0].Status; got != "done" {
+		t.Fatalf("refreshed status = %q", got)
+	}
+	requireSproutTick(t, m, rearm)
+}
+
+func TestSproutReopenIgnoresOldTick(t *testing.T) {
+	fake := &fakeSproutClient{sessions: []pioctl.Session{{ID: "active", Active: true}}, history: map[string][]pioctl.Entry{"active": nil}}
+	m := sproutOS(fake)
+	m.Sprout.gen = 5
+	m.CloseSprout()
+	open := m.OpenSprout()
+	if got := m.handleSproutMsg(SproutTickMsg{Gen: 5}); got != nil {
+		t.Fatalf("old tick follow-up = %T", got())
+	}
+	batch := sproutBatch(t, m.handleSproutMsg(open()))
+	ticks := 0
+	for _, cmd := range batch {
+		switch msg := cmd().(type) {
+		case SproutHistoryMsg:
+			m.handleSproutMsg(msg)
+		case SproutTickMsg:
+			if msg.Gen != m.Sprout.gen {
+				t.Fatalf("tick generation = %d, want %d", msg.Gen, m.Sprout.gen)
+			}
+			ticks++
+		default:
+			t.Fatalf("batch message = %T", msg)
+		}
+	}
+	if ticks != 1 {
+		t.Fatalf("ticks = %d, want 1", ticks)
 	}
 }
 
