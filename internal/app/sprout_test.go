@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"image/color"
 	"os"
 	"reflect"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/Gaurav-Gosain/tuios/internal/config"
 	"github.com/Gaurav-Gosain/tuios/internal/pioctl"
+	"github.com/Gaurav-Gosain/tuios/internal/theme"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -683,7 +685,7 @@ func TestSproutFrameDump(t *testing.T) {
 	model := "gpt-5.6-terra"
 	fake := &fakeSproutClient{
 		sessions: []pioctl.Session{{ID: "a", Name: "Alpha", Active: true}, {ID: "b", Name: "Beta"}},
-		tasks:    []pioctl.Task{{ID: "todo", Title: "Write frame dump", Status: "todo", Body: "Task body stays visible under the picker.", UpdatedAt: now}, {ID: "working", Title: "Refresh board", Status: "working", Body: "Working body", UpdatedAt: now}, {ID: "done", Title: "Done task", Status: "done", UpdatedAt: now}},
+		tasks:    []pioctl.Task{{ID: "todo", Title: "Write frame dump", Status: "todo", Body: "## Progress\n- Added frame rows\n\n- Reviewed picker", UpdatedAt: now}, {ID: "working", Title: "Refresh board", Status: "working", Body: "Working body", UpdatedAt: now}, {ID: "done", Title: "Done task", Status: "done", UpdatedAt: now}},
 		goals:    []pioctl.Goal{{ID: "ship", Title: "Ship Sprout", Status: "active", SuccessCriteria: "All checks green", Body: "Goal body", UpdatedAt: now}, {ID: "old", Title: "Old goal", Status: "abandoned", UpdatedAt: now}},
 		jobs:     []pioctl.Job{{Number: 1, Kind: "implement", TaskID: "working", State: "running", StartedAt: now}, {Number: 2, Kind: "review", TaskID: "done", State: "error", Error: "failed", StartedAt: now, EndedAt: &now}},
 	}
@@ -694,7 +696,7 @@ func TestSproutFrameDump(t *testing.T) {
 	}{
 		{"CONVERSATIONS", func(m *OS) {
 			m.Sprout.Selected = "a"
-			m.Sprout.Transcript = []pioctl.Entry{{Role: "user", Text: "hello"}, {Role: "assistant", Text: "world"}}
+			m.Sprout.Transcript = []pioctl.Entry{{Role: "user", Text: "hello"}, {Role: "assistant", Text: "first reply line\nsecond reply line\nthird reply line"}}
 		}},
 		{"FILES", func(m *OS) { m.Sprout.Subnav = 1 }},
 		{"WORKFLOWS", func(m *OS) { m.Sprout.Subnav = 2 }},
@@ -719,5 +721,147 @@ func TestSproutFrameDump(t *testing.T) {
 			}
 			t.Logf("--- %s %dx%d ---\n%s", view.name, size[0], size[1], frame)
 		}
+	}
+}
+
+func TestSproutNoticesExpireButLiveStatusPersists(t *testing.T) {
+	start := time.Date(2026, time.October, 6, 0, 0, 0, 0, time.UTC)
+	m := sproutOS(&fakeSproutClient{})
+	m.Sprout.gen = 1
+	m.handleSproutMsg(SproutCreatedMsg{Gen: 1, Subnav: 1, Task: pioctl.Task{ID: "made"}})
+	if m.Sprout.Status == "" {
+		t.Fatal("task-created notice missing")
+	}
+	m.Sprout.StatusAt = start
+	m.handleSproutMsg(SproutTickMsg{Gen: 1, At: start.Add(4 * time.Second)})
+	if m.Sprout.Status == "" {
+		t.Fatal("notice cleared before 6 seconds")
+	}
+	m.handleSproutMsg(SproutTickMsg{Gen: 1, At: start.Add(6 * time.Second)})
+	if m.Sprout.Status != "" {
+		t.Fatalf("notice = %q after 6 seconds, want cleared", m.Sprout.Status)
+	}
+
+	m.Sprout.Status = "thinking…"
+	m.Sprout.StatusAt = time.Time{}
+	m.handleSproutMsg(SproutTickMsg{Gen: 1, At: start.Add(12 * time.Second)})
+	if m.Sprout.Status != "thinking…" {
+		t.Fatalf("live status = %q, want thinking", m.Sprout.Status)
+	}
+
+	m.Sprout.StatusAt = start
+	m.Sprout.Focus, m.Sprout.Selected, m.Sprout.Composer = "composer", "a", "message"
+	m.SproutHandleKey("enter")
+	m.handleSproutMsg(SproutTickMsg{Gen: 1, At: start.Add(12 * time.Second)})
+	if m.Sprout.Status != "thinking…" {
+		t.Fatalf("send status = %q, want thinking", m.Sprout.Status)
+	}
+}
+
+func TestSproutSuccessfulRefreshClearsUnreachableNotice(t *testing.T) {
+	m := sproutOS(&fakeSproutClient{sessions: []pioctl.Session{{ID: "a"}}})
+	m.Sprout.gen = 1
+	m.Sprout.Status = "pio: unreachable"
+	m.handleSproutMsg(SproutRefreshMsg{Gen: 1, Sessions: m.Sprout.Sessions})
+	if m.Sprout.Status != "" {
+		t.Fatalf("status = %q after successful refresh, want cleared", m.Sprout.Status)
+	}
+}
+
+func TestSproutMultilineTextKeepsRowsAndWidths(t *testing.T) {
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := sproutOS(&fakeSproutClient{})
+		m.Width, m.Height, m.Sprout.Subnav = size[0], size[1], 1
+		m.Sprout.Tasks = []pioctl.Task{{ID: "task", Title: "Task", Body: "## Progress\n- Added a longer line that wraps at narrow pane width\n\n- Reviewed it"}}
+		frame := ansi.Strip(m.renderSprout())
+		for _, want := range []string{"## Progress", "- Added a longer", "- Reviewed it"} {
+			if !strings.Contains(frame, want) {
+				t.Fatalf("%dx%d missing row %q:\n%s", size[0], size[1], want, frame)
+			}
+		}
+		if got := len(strings.Split(frame, "\n")); got != size[1] {
+			t.Fatalf("%dx%d rows = %d", size[0], size[1], got)
+		}
+		for _, line := range strings.Split(frame, "\n") {
+			if lipgloss.Width(line) > size[0] {
+				t.Fatalf("%dx%d overflow: %q", size[0], size[1], line)
+			}
+		}
+	}
+
+	turns := sproutTurnLines([]pioctl.Entry{{Role: "assistant", Text: "one\ntwo\nthree"}}, 40, theme.UI(), func(fg, bg color.Color) lipgloss.Style {
+		return lipgloss.NewStyle().Foreground(fg).Background(bg)
+	})
+	if got, want := ansi.Strip(strings.Join(turns, "\n")), "assistant › one\n"+strings.Repeat(" ", lipgloss.Width("assistant › "))+"two\n"+strings.Repeat(" ", lipgloss.Width("assistant › "))+"three"; got != want {
+		t.Fatalf("multiline transcript = %q, want %q", got, want)
+	}
+}
+
+func TestSproutSelectionFollowsIDsAcrossRefreshFilterAndCreation(t *testing.T) {
+	m := sproutOS(&fakeSproutClient{})
+	m.Sprout.gen, m.Sprout.Subnav = 1, 1
+	m.Sprout.Tasks = []pioctl.Task{{ID: "a", Title: "A", Status: "todo", Body: "body A"}, {ID: "b", Title: "B", Status: "working", Body: "body B"}, {ID: "c", Title: "C", Status: "done", Body: "body C"}}
+	m.Sprout.TaskCursor = 1
+	m.Sprout.TaskSelected = "b"
+	m.handleSproutMsg(SproutBoardMsg{Gen: 1, Tasks: []pioctl.Task{{ID: "c", Title: "C", Status: "done", Body: "body C"}, {ID: "a", Title: "A", Status: "todo", Body: "body A"}, {ID: "b", Title: "B", Status: "working", Body: "body B"}}})
+	if m.Sprout.TaskCursor != 2 || !strings.Contains(ansi.Strip(m.renderSprout()), "body B") {
+		t.Fatalf("task selection = id %q cursor %d", m.Sprout.TaskSelected, m.Sprout.TaskCursor)
+	}
+	m.SproutHandleKey("k")
+	if m.Sprout.TaskSelected != "a" {
+		t.Fatalf("previous task selection = %q", m.Sprout.TaskSelected)
+	}
+	m.SproutHandleKey("j")
+	if m.Sprout.TaskSelected != "b" {
+		t.Fatalf("next task selection = %q", m.Sprout.TaskSelected)
+	}
+	m.handleSproutMsg(SproutBoardMsg{Gen: 1, Tasks: []pioctl.Task{{ID: "c", Title: "C", Status: "done"}, {ID: "a", Title: "A", Status: "todo"}}})
+	if m.Sprout.TaskCursor != 1 || m.Sprout.TaskSelected != "a" {
+		t.Fatalf("removed task selection = id %q cursor %d", m.Sprout.TaskSelected, m.Sprout.TaskCursor)
+	}
+	m.handleSproutMsg(SproutCreatedMsg{Gen: 1, Subnav: 1, Task: pioctl.Task{ID: "new", Title: "New", Status: "todo"}})
+	if m.Sprout.TaskSelected != "new" {
+		t.Fatalf("created task selection = %q", m.Sprout.TaskSelected)
+	}
+
+	m.Sprout.Subnav = 2
+	m.Sprout.Goals = []pioctl.Goal{{ID: "a", Title: "A", Status: "active", Body: "body A"}, {ID: "b", Title: "B", Status: "active", Body: "body B"}, {ID: "c", Title: "C", Status: "done", Body: "body C"}}
+	m.Sprout.GoalCursor, m.Sprout.GoalSelected = 1, "b"
+	m.handleSproutMsg(SproutBoardMsg{Gen: 1, Goals: []pioctl.Goal{{ID: "c", Title: "C", Status: "done", Body: "body C"}, {ID: "a", Title: "A", Status: "active", Body: "body A"}, {ID: "b", Title: "B", Status: "active", Body: "body B"}}})
+	if m.Sprout.GoalCursor != 2 || m.Sprout.GoalSelected != "b" || !strings.Contains(ansi.Strip(m.renderSprout()), "body B") {
+		t.Fatalf("goal selection = id %q cursor %d", m.Sprout.GoalSelected, m.Sprout.GoalCursor)
+	}
+	m.SproutHandleKey("k")
+	if m.Sprout.GoalSelected != "a" {
+		t.Fatalf("previous goal selection = %q", m.Sprout.GoalSelected)
+	}
+	m.SproutHandleKey("j")
+	if m.Sprout.GoalSelected != "b" {
+		t.Fatalf("next goal selection = %q", m.Sprout.GoalSelected)
+	}
+	m.handleSproutMsg(SproutCreatedMsg{Gen: 1, Subnav: 2, Goal: pioctl.Goal{ID: "new-goal", Title: "New", Status: "proposed"}})
+	if m.Sprout.GoalSelected != "new-goal" {
+		t.Fatalf("created goal selection = %q", m.Sprout.GoalSelected)
+	}
+	m.handleSproutMsg(SproutBoardMsg{Gen: 1, Goals: []pioctl.Goal{{ID: "c", Title: "C", Status: "done"}, {ID: "a", Title: "A", Status: "active"}}})
+	if m.Sprout.GoalCursor != 1 || m.Sprout.GoalSelected != "a" {
+		t.Fatalf("removed goal selection = id %q cursor %d", m.Sprout.GoalSelected, m.Sprout.GoalCursor)
+	}
+}
+
+func TestSproutConversationCursorFollowsID(t *testing.T) {
+	m := sproutOS(&fakeSproutClient{})
+	m.Sprout.gen = 1
+	m.Sprout.Sessions = []pioctl.Session{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}}
+	m.Sprout.Cursor, m.Sprout.CursorID = 1, "b"
+	m.handleSproutMsg(SproutRefreshMsg{Gen: 1, Sessions: []pioctl.Session{{ID: "new", Name: "New"}, {ID: "a", Name: "A"}, {ID: "b", Name: "B"}}})
+	if m.Sprout.Cursor != 2 || m.Sprout.CursorID != "b" {
+		t.Fatalf("conversation cursor = id %q index %d", m.Sprout.CursorID, m.Sprout.Cursor)
+	}
+	m.Sprout.Filter = 2
+	m.Sprout.Unread = map[string]bool{"a": true}
+	m.SproutHandleKey("f")
+	if m.Sprout.CursorID != "a" || m.Sprout.Cursor != 0 {
+		t.Fatalf("filtered cursor = id %q index %d", m.Sprout.CursorID, m.Sprout.Cursor)
 	}
 }

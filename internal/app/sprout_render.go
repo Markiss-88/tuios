@@ -169,7 +169,7 @@ func (m *OS) sproutSidebar(width, rows int, selectedTabs []sessiontree.Node) []s
 		left = append(left, sproutPair("Conversations", "+", width), "Search conversations...", filters, "")
 		for _, session := range s.visibleSessions() {
 			name := sproutSessionName(session)
-			if session.ID == s.Selected {
+			if session.ID == s.CursorID {
 				name = "> " + name
 			} else if session.Active {
 				name = "* " + name
@@ -292,7 +292,7 @@ func (m *OS) sproutTaskMain(right []string, composer, width int) {
 	if body == "" {
 		body = "(no body)"
 	}
-	for i, line := range strings.Split(ansi.Wrap(sproutText(body), max(1, width), ""), "\n") {
+	for i, line := range sproutTextLines(body, width) {
 		if i+2 < composer {
 			right[i+2] = line
 		}
@@ -317,14 +317,25 @@ func (m *OS) sproutGoalMain(right []string, composer, width int) {
 		right[1] = strings.Join(parts, " · ")
 	}
 	row := 2
-	if goal.SuccessCriteria != "" && row < composer {
-		right[row], row = "criteria: "+goal.SuccessCriteria, row+1
+	if goal.SuccessCriteria != "" {
+		prefix := "criteria: "
+		for i, line := range sproutTextLines(goal.SuccessCriteria, max(1, width-lipgloss.Width(prefix))) {
+			if row >= composer {
+				break
+			}
+			if i == 0 {
+				line = prefix + line
+			} else {
+				line = strings.Repeat(" ", lipgloss.Width(prefix)) + line
+			}
+			right[row], row = line, row+1
+		}
 	}
 	body := goal.Body
 	if body == "" {
 		body = "(no body)"
 	}
-	for _, line := range strings.Split(ansi.Wrap(sproutText(body), max(1, width), ""), "\n") {
+	for _, line := range sproutTextLines(body, width) {
 		if row >= composer {
 			break
 		}
@@ -383,9 +394,9 @@ func sproutTurnLines(entries []pioctl.Entry, width int, pal overlay.Palette, sty
 		if entry.Error != "" {
 			prefix, fg, text = "error › ", pal.Warn, entry.Error
 		}
-		wrapped := strings.Split(ansi.Wrap(sproutText(text), max(1, width-lipgloss.Width(prefix)), ""), "\n")
+		wrapped := sproutTextLines(text, max(1, width-lipgloss.Width(prefix)))
 		for i, line := range wrapped {
-			lead := ""
+			lead := strings.Repeat(" ", lipgloss.Width(prefix))
 			if i == 0 {
 				lead = prefix
 			}
@@ -397,11 +408,32 @@ func sproutTurnLines(entries []pioctl.Entry, width int, pal overlay.Palette, sty
 
 func sproutText(text string) string {
 	return strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return ' '
+		}
 		if unicode.IsControl(r) {
 			return -1
 		}
 		return r
 	}, text)
+}
+
+func sproutTextLines(text string, width int) []string {
+	var lines []string
+	blank := false
+	for _, raw := range strings.Split(text, "\n") {
+		line := sproutText(raw)
+		if line == "" {
+			blank = len(lines) > 0
+			continue
+		}
+		if blank {
+			lines = append(lines, "")
+			blank = false
+		}
+		lines = append(lines, strings.Split(ansi.Wrap(line, max(1, width), ""), "\n")...)
+	}
+	return lines
 }
 func sproutSessionName(session pioctl.Session) string {
 	if session.Name != "" {

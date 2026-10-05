@@ -34,6 +34,8 @@ type SproutState struct {
 	Tab, Subnav, Filter, Cursor int
 	TaskFilter, GoalFilter      int
 	TaskCursor, GoalCursor      int
+	CursorID                    string
+	TaskSelected, GoalSelected  string
 	RecentJobs                  bool
 	Picker                      int
 	ModelDraft                  string
@@ -45,6 +47,7 @@ type SproutState struct {
 	Config                      pioctl.Config
 	Transcript                  []pioctl.Entry
 	Composer, Status            string
+	StatusAt                    time.Time
 	Scroll                      int
 	Follow                      bool
 	Unread                      map[string]bool
@@ -101,7 +104,12 @@ type SproutStreamMsg struct {
 	Gen, Stream uint64
 	ch          <-chan SproutStreamMsg
 }
-type SproutTickMsg struct{ Gen uint64 }
+type SproutTickMsg struct {
+	Gen uint64
+	At  time.Time
+}
+
+const sproutNoticeDuration = 6 * time.Second
 
 func sproutTabIndex(current, count, delta int) int {
 	if count == 0 {
@@ -144,6 +152,60 @@ func (s *SproutState) visibleGoals() []pioctl.Goal {
 	}
 	return out
 }
+
+func (s *SproutState) syncSessionCursor() {
+	sessions := s.visibleSessions()
+	if len(sessions) == 0 {
+		s.Cursor, s.CursorID = 0, ""
+		return
+	}
+	for i, session := range sessions {
+		if session.ID == s.CursorID {
+			s.Cursor = i
+			return
+		}
+	}
+	s.Cursor = min(max(0, s.Cursor), len(sessions)-1)
+	s.CursorID = sessions[s.Cursor].ID
+}
+
+func (s *SproutState) syncTaskCursor() {
+	tasks := s.visibleTasks()
+	if len(tasks) == 0 {
+		s.TaskCursor, s.TaskSelected = 0, ""
+		return
+	}
+	for i, task := range tasks {
+		if task.ID == s.TaskSelected {
+			s.TaskCursor = i
+			return
+		}
+	}
+	s.TaskCursor = min(max(0, s.TaskCursor), len(tasks)-1)
+	s.TaskSelected = tasks[s.TaskCursor].ID
+}
+
+func (s *SproutState) syncGoalCursor() {
+	goals := s.visibleGoals()
+	if len(goals) == 0 {
+		s.GoalCursor, s.GoalSelected = 0, ""
+		return
+	}
+	for i, goal := range goals {
+		if goal.ID == s.GoalSelected {
+			s.GoalCursor = i
+			return
+		}
+	}
+	s.GoalCursor = min(max(0, s.GoalCursor), len(goals)-1)
+	s.GoalSelected = goals[s.GoalCursor].ID
+}
+
+func (s *SproutState) setNotice(status string) {
+	s.Status, s.StatusAt = status, time.Now()
+}
+
+func (s *SproutState) clearStatus() { s.Status, s.StatusAt = "", time.Time{} }
 
 func sproutPrintable(key string) bool {
 	r, size := utf8.DecodeRuneInString(key)
@@ -255,7 +317,7 @@ func (m *OS) sproutHarnessCmd(name, model string) tea.Cmd {
 }
 func (m *OS) sproutTick() tea.Cmd {
 	gen := m.Sprout.gen
-	return tea.Tick(2*time.Second, func(time.Time) tea.Msg { return SproutTickMsg{Gen: gen} })
+	return tea.Tick(2*time.Second, func(at time.Time) tea.Msg { return SproutTickMsg{Gen: gen, At: at} })
 }
 
 func (m *OS) selectSproutSession(id string) tea.Cmd {
@@ -263,10 +325,13 @@ func (m *OS) selectSproutSession(id string) tea.Cmd {
 	s.gen++
 	s.Selected, s.Transcript, s.Scroll, s.Follow = id, nil, 0, true
 	s.Focus = "main"
-	s.Status, s.Sending, s.liveTurn, s.pendingUser, s.pendingText = "", false, -1, -1, ""
+	s.clearStatus()
+	s.Sending, s.liveTurn, s.pendingUser, s.pendingText = false, -1, -1, ""
 	if s.Unread != nil {
 		delete(s.Unread, id)
 	}
+	s.CursorID = id
+	s.syncSessionCursor()
 	return m.sproutSelectCmd(id)
 }
 
@@ -309,6 +374,10 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			return m.sproutTick()
 		}
 		s.Sessions, s.Config = x.Sessions, x.Config
+		s.syncSessionCursor()
+		if s.Status == "pio: unreachable" {
+			s.clearStatus()
+		}
 		if s.Selected == "" {
 			for _, session := range s.Sessions {
 				if session.Active {
@@ -323,16 +392,17 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 		}
 		m.renderSkipped = false
 		if x.Err != nil {
-			s.Status = "pio: " + x.Err.Error()
+			s.setNotice("pio: " + x.Err.Error())
 			return nil
 		}
-		s.Transcript, s.Scroll, s.Follow, s.Status = x.Entries, 0, true, ""
+		s.Transcript, s.Scroll, s.Follow = x.Entries, 0, true
+		s.clearStatus()
 	case SproutCreateMsg:
 		if x.Gen != s.gen || !m.ShowSprout {
 			return nil
 		}
 		if x.Err != nil {
-			s.Status = "pio: " + x.Err.Error()
+			s.setNotice("pio: " + x.Err.Error())
 			return nil
 		}
 		return tea.Batch(m.selectSproutSession(x.Session.ID), m.sproutTick())
@@ -341,26 +411,30 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if x.Err != nil {
-			s.Status = sproutError(x.Err)
+			s.setNotice(sproutError(x.Err))
 			return nil
 		}
 		s.Tasks, s.Goals, s.Jobs, s.Connected = x.Tasks, x.Goals, x.Jobs, true
+		s.syncTaskCursor()
+		s.syncGoalCursor()
 	case SproutCreatedMsg:
 		if x.Gen != s.gen || !m.ShowSprout {
 			return nil
 		}
 		if x.Err != nil {
-			s.Status = sproutError(x.Err)
+			s.setNotice(sproutError(x.Err))
 			return nil
 		}
 		if x.Subnav == 1 {
 			s.Tasks = append(s.Tasks, x.Task)
-			s.TaskCursor = max(0, len(s.visibleTasks())-1)
-			s.Status = "task created: " + x.Task.ID
+			s.TaskFilter, s.TaskSelected = 0, x.Task.ID
+			s.syncTaskCursor()
+			s.setNotice("task created: " + x.Task.ID)
 		} else {
 			s.Goals = append(s.Goals, x.Goal)
-			s.GoalCursor = max(0, len(s.visibleGoals())-1)
-			s.Status = "goal created: " + x.Goal.ID
+			s.GoalFilter, s.GoalSelected = 0, x.Goal.ID
+			s.syncGoalCursor()
+			s.setNotice("goal created: " + x.Goal.ID)
 		}
 		s.Composer = ""
 	case SproutHarnessMsg:
@@ -368,11 +442,13 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		if x.Err != nil {
-			s.Status, s.Focus = sproutError(x.Err), "sidebar"
+			s.setNotice(sproutError(x.Err))
+			s.Focus = "sidebar"
 			return nil
 		}
 		s.Config.Harness.Name, s.Config.Harness.Model = x.Result.Name, x.Result.Model
-		s.Status, s.Focus = "harness: "+x.Result.Name+" "+x.Result.Model, "sidebar"
+		s.setNotice("harness: " + x.Result.Name + " " + x.Result.Model)
+		s.Focus = "sidebar"
 	case SproutStreamMsg:
 		terminal := x.Type == ""
 		// WHY: a command may outlive its pane; generation keeps its stream off a new chat.
@@ -398,7 +474,7 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			}
 			s.Transcript[s.liveTurn].Text += x.Text
 		case "status":
-			s.Status = x.Text
+			s.Status, s.StatusAt = x.Text, time.Time{}
 		default:
 			liveTurn := s.liveTurn
 			s.Sending, s.liveTurn = false, -1
@@ -408,9 +484,9 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 				}
 				s.Composer = s.pendingText
 				if errors.Is(x.Err, pioctl.ErrUnreachable) {
-					s.Status = "pio: unreachable"
+					s.setNotice("pio: unreachable")
 				} else {
-					s.Status = "pio: " + x.Err.Error()
+					s.setNotice("pio: " + x.Err.Error())
 				}
 				s.pendingUser, s.pendingText = -1, ""
 				return nil
@@ -420,7 +496,8 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			} else if liveTurn < 0 {
 				s.Transcript = append(s.Transcript, pioctl.Entry{Role: "assistant", Text: x.Result.Text})
 			}
-			s.Status, s.pendingUser, s.pendingText = "", -1, ""
+			s.clearStatus()
+			s.pendingUser, s.pendingText = -1, ""
 		}
 		if !terminal {
 			return sproutNextStreamCmd(x.ch)
@@ -428,6 +505,13 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 	case SproutTickMsg:
 		if x.Gen == s.gen && m.ShowSprout {
 			m.renderSkipped = false
+			at := x.At
+			if at.IsZero() {
+				at = time.Now()
+			}
+			if !s.StatusAt.IsZero() && !at.Before(s.StatusAt.Add(sproutNoticeDuration)) {
+				s.clearStatus()
+			}
 			if s.Subnav != 0 {
 				return tea.Batch(m.sproutRefreshCmd(), m.sproutBoardCmd())
 			}
@@ -479,7 +563,7 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 			}
 			if !s.Sending {
 				s.Transcript = append(s.Transcript, pioctl.Entry{Role: "user", Text: s.Composer})
-				s.Status, s.Sending, s.liveTurn, s.Follow = "thinking…", true, -1, true
+				s.Status, s.StatusAt, s.Sending, s.liveTurn, s.Follow = "thinking…", time.Time{}, true, -1, true
 				s.pendingUser, s.pendingText = len(s.Transcript)-1, s.Composer
 				s.Composer = ""
 				return m.sproutStartSendCmd()
@@ -502,7 +586,7 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 			}
 		case "enter":
 			if s.ModelDraft == "" {
-				s.Status = "model cannot be empty"
+				s.setNotice("model cannot be empty")
 				return nil
 			}
 			return m.sproutHarnessCmd(s.Config.Harness.Name, s.ModelDraft)
@@ -559,37 +643,42 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 		switch s.Subnav {
 		case 0:
 			s.Filter = (s.Filter + 1) % 4
-			s.Cursor = 0
+			s.syncSessionCursor()
 		case 1:
 			s.TaskFilter = (s.TaskFilter + 1) % 3
-			s.TaskCursor = 0
+			s.syncTaskCursor()
 		case 2:
 			s.GoalFilter = (s.GoalFilter + 1) % 3
-			s.GoalCursor = 0
+			s.syncGoalCursor()
 		}
 	case "j", "down":
 		if s.Subnav == 1 {
 			if tasks := s.visibleTasks(); len(tasks) > 0 {
 				s.TaskCursor = (s.TaskCursor + 1) % len(tasks)
+				s.TaskSelected = tasks[s.TaskCursor].ID
 			}
 		} else if s.Subnav == 2 {
 			if goals := s.visibleGoals(); len(goals) > 0 {
 				s.GoalCursor = (s.GoalCursor + 1) % len(goals)
+				s.GoalSelected = goals[s.GoalCursor].ID
 			}
 		} else if s.Focus == "main" {
 			s.Scroll++
 			s.Follow = false
 		} else if sessions := s.visibleSessions(); len(sessions) > 0 {
 			s.Cursor = (s.Cursor + 1) % len(sessions)
+			s.CursorID = sessions[s.Cursor].ID
 		}
 	case "k", "up":
 		if s.Subnav == 1 {
 			if tasks := s.visibleTasks(); len(tasks) > 0 {
 				s.TaskCursor = (s.TaskCursor + len(tasks) - 1) % len(tasks)
+				s.TaskSelected = tasks[s.TaskCursor].ID
 			}
 		} else if s.Subnav == 2 {
 			if goals := s.visibleGoals(); len(goals) > 0 {
 				s.GoalCursor = (s.GoalCursor + len(goals) - 1) % len(goals)
+				s.GoalSelected = goals[s.GoalCursor].ID
 			}
 		} else if s.Focus == "main" {
 			if s.Scroll > 0 {
@@ -598,6 +687,7 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 			s.Follow = false
 		} else if sessions := s.visibleSessions(); len(sessions) > 0 {
 			s.Cursor = (s.Cursor + len(sessions) - 1) % len(sessions)
+			s.CursorID = sessions[s.Cursor].ID
 		}
 	case "pgup":
 		if s.Focus == "main" {
