@@ -115,6 +115,33 @@ func fakeRequest(t *testing.T, reply func(map[string]any) []string) *Client {
 	return &Client{Socket: path, Timeout: time.Second}
 }
 
+func fakeServer(t *testing.T, handle func(net.Conn, map[string]any)) *Client {
+	t.Helper()
+	path := filepath.Join("/tmp", fmt.Sprintf("tuios-pioctl-%d.sock", time.Now().UnixNano()))
+	_ = os.Remove(path)
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close(); os.Remove(path) })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				var request map[string]any
+				if json.NewDecoder(conn).Decode(&request) == nil {
+					handle(conn, request)
+				}
+			}()
+		}
+	}()
+	return &Client{Socket: path, Timeout: 100 * time.Millisecond}
+}
+
 func TestVerbsAndStream(t *testing.T) {
 	c := fixture(t)
 	ctx := context.Background()
@@ -153,6 +180,68 @@ func TestRejectedMalformedAndUnreachable(t *testing.T) {
 	_, err := (&Client{Socket: filepath.Join(t.TempDir(), "none"), Timeout: time.Millisecond}).Status(context.Background())
 	if err == nil {
 		t.Fatal("unreachable accepted")
+	}
+}
+
+func TestSendWaitsThroughQuietTurn(t *testing.T) {
+	c := fakeServer(t, func(conn net.Conn, request map[string]any) {
+		if request["verb"] != "chat.send" {
+			t.Errorf("verb=%v", request["verb"])
+			return
+		}
+		fmt.Fprintln(conn, `{"event":{"type":"status","text":"thinking"}}`)
+		time.Sleep(400 * time.Millisecond)
+		fmt.Fprintln(conn, `{"event":{"type":"delta","text":"echo: "}}`)
+		fmt.Fprintln(conn, `{"event":{"type":"delta","text":"slow"}}`)
+		fmt.Fprintln(conn, `{"ok":true,"done":true,"result":{"ok":true,"text":"echo: slow"}}`)
+	})
+	var events []string
+	result, err := c.Send(context.Background(), "default", "slow", func(event json.RawMessage) {
+		var value struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(event, &value) == nil {
+			events = append(events, value.Type)
+		}
+	})
+	if err != nil || !result.OK || result.Text != "echo: slow" || strings.Join(events, ",") != "status,delta,delta" {
+		t.Fatalf("result=%+v err=%v events=%v", result, err, events)
+	}
+}
+
+func TestNonStreamingCallStillTimesOut(t *testing.T) {
+	c := fakeServer(t, func(conn net.Conn, _ map[string]any) { time.Sleep(time.Second) })
+	started := time.Now()
+	_, err := c.Sessions(context.Background())
+	if !errors.Is(err, ErrUnreachable) || time.Since(started) > 3*c.Timeout {
+		t.Fatalf("err=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestSendContextCancellationStopsQuietTurn(t *testing.T) {
+	status := make(chan struct{})
+	c := fakeServer(t, func(conn net.Conn, _ map[string]any) {
+		fmt.Fprintln(conn, `{"event":{"type":"status","text":"thinking"}}`)
+		close(status)
+		time.Sleep(time.Second)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Send(ctx, "default", "slow", nil)
+		done <- err
+	}()
+	<-status
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || time.Since(started) > c.Timeout {
+			t.Fatalf("err=%v elapsed=%s", err, time.Since(started))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send did not stop after context cancellation")
 	}
 }
 
@@ -301,8 +390,10 @@ func TestLiveAgainstRealPio(t *testing.T) {
 			result ChatResult
 			err    error
 		}, 1)
+		slowClient := New(root)
+		slowClient.Timeout = 200 * time.Millisecond
 		go func() {
-			result, err := c.Send(context.Background(), created.ID, "slow please", nil)
+			result, err := slowClient.Send(context.Background(), created.ID, "slow please", nil)
 			slow <- struct {
 				result ChatResult
 				err    error

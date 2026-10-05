@@ -126,9 +126,17 @@ func (c *Client) call(ctx context.Context, verb string, params any, event func(j
 	if _, err := conn.Write(append(b, '\n')); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
+	if verb == "chat.send" {
+		// A model turn is quiet longer than any request timeout, and pio always sends a terminal line.
+		_ = conn.SetDeadline(time.Time{})
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		defer stop()
+	}
 	s := bufio.NewScanner(conn)
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		if verb != "chat.send" {
+			_ = conn.SetReadDeadline(time.Now().Add(timeout))
+		}
 		if !s.Scan() {
 			break
 		}
@@ -151,6 +159,9 @@ func (c *Client) call(ctx context.Context, verb string, params any, event func(j
 		if verb != "chat.send" || r.Done {
 			return r.Result, nil
 		}
+	}
+	if verb == "chat.send" && ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	if err := s.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
