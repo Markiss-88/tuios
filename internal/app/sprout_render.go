@@ -324,18 +324,24 @@ func (m *OS) sproutGoalMain(right []string, composer, width int) {
 		right[1] = strings.Join(parts, " · ")
 	}
 	row := 2
-	if goal.SuccessCriteria != "" {
-		prefix := "criteria: "
-		for i, line := range sproutTextLines(goal.SuccessCriteria, max(1, width-lipgloss.Width(prefix))) {
-			if row >= composer {
-				break
+	if len(goal.SuccessCriteria) != 0 && row < composer {
+		right[row], row = "criteria:", row+1
+		for _, criterion := range goal.SuccessCriteria {
+			prefix := "- "
+			if criterion.ID != "" {
+				prefix += "[" + criterion.ID + "] "
 			}
-			if i == 0 {
-				line = prefix + line
-			} else {
-				line = strings.Repeat(" ", lipgloss.Width(prefix)) + line
+			for i, line := range sproutTextLines(criterion.Condition, max(1, width-lipgloss.Width(prefix))) {
+				if row >= composer {
+					break
+				}
+				if i == 0 {
+					line = prefix + line
+				} else {
+					line = strings.Repeat(" ", lipgloss.Width(prefix)) + line
+				}
+				right[row], row = line, row+1
 			}
-			right[row], row = line, row+1
 		}
 	}
 	body := goal.Body

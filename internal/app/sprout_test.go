@@ -519,7 +519,7 @@ func TestSproutPaletteReachable(t *testing.T) {
 }
 
 func TestSproutBoardFiltersAndRender(t *testing.T) {
-	fake := &fakeSproutClient{tasks: []pioctl.Task{{ID: "done", Title: "Done", Status: "done", UpdatedAt: time.Now(), Body: "done body"}, {ID: "working", Title: "Working", Status: "working", UpdatedAt: time.Now(), Attempt: 2, ReviewRequired: true, Body: "working body"}, {ID: "todo", Title: "Todo", Status: "todo", UpdatedAt: time.Now()}}, goals: []pioctl.Goal{{ID: "old", Title: "Old", Status: "abandoned"}, {ID: "live", Title: "Live", Status: "active", SuccessCriteria: "ship", Body: "goal body"}}}
+	fake := &fakeSproutClient{tasks: []pioctl.Task{{ID: "done", Title: "Done", Status: "done", UpdatedAt: time.Now(), Body: "done body"}, {ID: "working", Title: "Working", Status: "working", UpdatedAt: time.Now(), Attempt: 2, ReviewRequired: true, Body: "working body"}, {ID: "todo", Title: "Todo", Status: "todo", UpdatedAt: time.Now()}}, goals: []pioctl.Goal{{ID: "old", Title: "Old", Status: "abandoned"}, {ID: "live", Title: "Live", Status: "active", SuccessCriteria: []pioctl.GoalCriterion{{Condition: "ship"}}, Body: "goal body"}}}
 	m := sproutOS(fake)
 	driveSprout(t, m, m.SproutHandleKey("tab"))
 	m.Sprout.TaskCursor = 1
@@ -542,6 +542,46 @@ func TestSproutBoardFiltersAndRender(t *testing.T) {
 	m.SproutHandleKey("f")
 	if len(m.Sprout.visibleGoals()) != 1 {
 		t.Fatalf("closed=%d", len(m.Sprout.visibleGoals()))
+	}
+}
+
+func TestSproutGoalCriteriaRender(t *testing.T) {
+	criteria := []pioctl.GoalCriterion{
+		{ID: "welcome-file-exact-content", Condition: "A regular WELCOME.md file exists at the workspace root; its complete content is exactly welcome to pio with at most one terminal newline."},
+		{Condition: "The workspace contains no extra welcome files, and each visible path stays inside the narrow workflows pane without overflowing its frame."},
+	}
+	for _, size := range [][2]int{{80, 24}, {120, 40}} {
+		m := sproutOS(&fakeSproutClient{goals: []pioctl.Goal{{ID: "welcome", Title: "Welcome", Status: "active", SuccessCriteria: criteria, Body: "body"}}})
+		m.Width, m.Height, m.Sprout.Subnav = size[0], size[1], 2
+		frame := ansi.Strip(m.renderSprout())
+		lines := strings.Split(frame, "\n")
+		if len(lines) != size[1] {
+			t.Fatalf("%dx%d lines=%d", size[0], size[1], len(lines))
+		}
+		for _, line := range lines {
+			if lipgloss.Width(line) > size[0] {
+				t.Fatalf("%dx%d overflow %q", size[0], size[1], line)
+			}
+		}
+		flat := strings.Join(strings.Fields(frame), " ")
+		if !strings.Contains(flat, "criteria:") {
+			t.Fatalf("%dx%d missing criteria:\n%s", size[0], size[1], frame)
+		}
+		for _, criterion := range criteria {
+			text := criterion.Condition
+			if criterion.ID != "" {
+				text = "[" + criterion.ID + "] " + text
+			}
+			if !strings.Contains(flat, strings.Join(strings.Fields(text), " ")) {
+				t.Fatalf("%dx%d missing criterion %q:\n%s", size[0], size[1], text, frame)
+			}
+		}
+	}
+
+	m := sproutOS(&fakeSproutClient{goals: []pioctl.Goal{{ID: "empty", Title: "Empty", Status: "active", Body: "body"}}})
+	m.Sprout.Subnav = 2
+	if frame := ansi.Strip(m.renderSprout()); strings.Contains(frame, "criteria:") {
+		t.Fatalf("empty criteria block:\n%s", frame)
 	}
 }
 
@@ -694,7 +734,7 @@ func TestSproutFrameDump(t *testing.T) {
 	fake := &fakeSproutClient{
 		sessions: []pioctl.Session{{ID: "a", Name: "Alpha", Active: true}, {ID: "b", Name: "Beta"}},
 		tasks:    []pioctl.Task{{ID: "todo", Title: "Write frame dump", Status: "todo", Body: "## Progress\n- Added frame rows\n\n- Reviewed picker", UpdatedAt: now}, {ID: "working", Title: "Refresh board", Status: "working", Body: "Working body", UpdatedAt: now}, {ID: "done", Title: "Done task", Status: "done", UpdatedAt: now}},
-		goals:    []pioctl.Goal{{ID: "ship", Title: "Ship Sprout", Status: "active", SuccessCriteria: "All checks green", Body: "Goal body", UpdatedAt: now}, {ID: "old", Title: "Old goal", Status: "abandoned", UpdatedAt: now}},
+		goals:    []pioctl.Goal{{ID: "ship", Title: "Ship Sprout", Status: "active", SuccessCriteria: []pioctl.GoalCriterion{{ID: "checks", Condition: "All checks green"}, {Condition: "Workflows frame stays inside its pane"}}, Body: "Goal body", UpdatedAt: now}, {ID: "old", Title: "Old goal", Status: "abandoned", UpdatedAt: now}},
 		jobs:     []pioctl.Job{{Number: 1, Kind: "implement", TaskID: "working", State: "running", StartedAt: now}, {Number: 2, Kind: "review", TaskID: "done", State: "error", Error: "failed", StartedAt: now, EndedAt: &now}},
 	}
 	fake.config.Harness.Name, fake.config.Harness.Model = "codex", model

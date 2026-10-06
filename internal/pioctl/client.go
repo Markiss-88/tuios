@@ -3,6 +3,7 @@ package pioctl
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,17 +53,56 @@ type Task struct {
 	WaitingFor     string    `json:"waiting_for"`
 	Body           string    `json:"body"`
 }
-type Goal struct {
-	ID              string    `json:"id"`
-	Title           string    `json:"title"`
-	Status          string    `json:"status"`
-	UpdatedAt       time.Time `json:"updated_at"`
-	SuccessCriteria string    `json:"success_criteria"`
-	ReviewTrigger   string    `json:"review_trigger"`
-	Round           int       `json:"round"`
-	RoundTaskIDs    []string  `json:"round_task_ids"`
-	Body            string    `json:"body"`
+
+// GoalCriterion describes one condition required to complete a goal.
+type GoalCriterion struct {
+	ID               string `json:"id"`
+	Condition        string `json:"condition"`
+	EvidenceRequired string `json:"evidence_required"`
 }
+
+type Goal struct {
+	ID              string          `json:"id"`
+	Title           string          `json:"title"`
+	Status          string          `json:"status"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	SuccessCriteria []GoalCriterion `json:"success_criteria"`
+	ReviewTrigger   string          `json:"review_trigger"`
+	Round           int             `json:"round"`
+	RoundTaskIDs    []string        `json:"round_task_ids"`
+	Body            string          `json:"body"`
+}
+
+func (g *Goal) UnmarshalJSON(data []byte) error {
+	type goal Goal
+	var wire struct {
+		*goal
+		SuccessCriteria json.RawMessage `json:"success_criteria"`
+	}
+	wire.goal = (*goal)(g)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	criteria := bytes.TrimSpace(wire.SuccessCriteria)
+	if len(criteria) == 0 || bytes.Equal(criteria, []byte("null")) {
+		g.SuccessCriteria = nil
+		return nil
+	}
+	if criteria[0] == '"' {
+		var legacy string
+		if err := json.Unmarshal(criteria, &legacy); err != nil {
+			return err
+		}
+		if legacy == "" {
+			g.SuccessCriteria = nil
+		} else {
+			g.SuccessCriteria = []GoalCriterion{{Condition: legacy}}
+		}
+		return nil
+	}
+	return json.Unmarshal(criteria, &g.SuccessCriteria)
+}
+
 type Job struct {
 	Number    int        `json:"number"`
 	Kind      string     `json:"kind"`

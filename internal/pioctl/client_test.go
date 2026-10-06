@@ -53,6 +53,17 @@ func fixture(t *testing.T) *Client {
 		return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
 	})
 }
+
+func fixtureWire(t *testing.T, name string) *Client {
+	t.Helper()
+	return fake(t, func(string) []string {
+		b, err := os.ReadFile(filepath.Join("testdata", "wire", name+".jsonl"))
+		if err != nil {
+			t.Fatalf("fixture %s: %v", name, err)
+		}
+		return strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	})
+}
 func fixtureName(q map[string]any) string {
 	verb, _ := q["verb"].(string)
 	params, _ := q["params"].(map[string]any)
@@ -371,6 +382,39 @@ func TestRealWireDecodes(t *testing.T) {
 	created, err := c.CreateTask(ctx, "Made from socket")
 	if err != nil || created.ID != "made-from-socket" {
 		t.Fatalf("task=%+v err=%v", created, err)
+	}
+}
+
+func TestGoalCriteriaWireCompatibility(t *testing.T) {
+	goals, err := fixtureWire(t, "goals.list").Goals(context.Background(), "")
+	if err != nil || len(goals) != 2 {
+		t.Fatalf("goals=%+v err=%v", goals, err)
+	}
+	byID := map[string]Goal{}
+	for _, g := range goals {
+		byID[g.ID] = g
+	}
+	// Captured from pio's dev host: one goal seeded with a structured criterion, one with a legacy string.
+	structured := GoalCriterion{ID: "site-live", Condition: "Launch complete", EvidenceRequired: "Open the site and see the home page"}
+	if got := byID["launch-bakery-site"].SuccessCriteria; len(got) != 1 || got[0] != structured {
+		t.Fatalf("structured criteria=%+v", got)
+	}
+	legacy := GoalCriterion{ID: "legacy-success-criterion", Condition: "Migration retired"}
+	if got := byID["old-migration"].SuccessCriteria; len(got) != 1 || got[0] != legacy {
+		t.Fatalf("legacy criteria=%+v", got)
+	}
+
+	var empty Goal
+	if err := json.Unmarshal([]byte(`{"success_criteria":""}`), &empty); err != nil || len(empty.SuccessCriteria) != 0 {
+		t.Fatalf("empty=%+v err=%v", empty.SuccessCriteria, err)
+	}
+}
+
+func TestCreateGoalStructuredCriteria(t *testing.T) {
+	// goals.create over the socket takes a title only; the captured reply carries an empty criteria list.
+	goal, err := fixtureWire(t, "goals.create").CreateGoal(context.Background(), "Goal from socket")
+	if err != nil || goal.ID != "goal-from-socket" || len(goal.SuccessCriteria) != 0 {
+		t.Fatalf("goal=%+v err=%v", goal, err)
 	}
 }
 
