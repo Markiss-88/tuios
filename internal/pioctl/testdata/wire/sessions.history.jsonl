@@ -1,1 +1,1 @@
-{"id":1,"ok":true,"result":{"id":"default","entries":[{"at":"2026-09-29T10:10:14.594Z","role":"user","text":"Seed user for Default"},{"at":"2026-09-29T10:10:14.595Z","role":"assistant","text":"Seed assistant for Default"}],"skipped":0}}
+{"id":1,"ok":true,"result":{"id":"default","entries":[{"at":"2026-10-06T17:47:38.009Z","role":"user","text":"Seed user for Default"},{"at":"2026-10-06T17:47:38.010Z","role":"assistant","text":"Seed assistant for Default"}],"skipped":0}}

@@ -25,6 +25,10 @@ if [[ ${LIVE_ONLY:-} == 1 ]]; then
 fi
 
 request ping '{"id":1,"verb":"ping"}'
+request status '{"id":1,"verb":"status"}'
+request auto.set.on '{"id":1,"verb":"auto.set","params":{"enabled":true}}'
+request auto.set.off '{"id":1,"verb":"auto.set","params":{"enabled":false}}'
+request auto.set.bad '{"id":1,"verb":"auto.set","params":{"enabled":"not-a-boolean"}}'
 request sessions.list '{"id":1,"verb":"sessions.list"}'
 request sessions.history '{"id":1,"verb":"sessions.history","params":{"id":"default","limit":50}}'
 request sessions.create '{"id":1,"verb":"sessions.create","params":{"name":"Captured"}}'

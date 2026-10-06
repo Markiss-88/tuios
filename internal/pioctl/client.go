@@ -87,6 +87,10 @@ type Config struct {
 		Model string `json:"model"`
 	} `json:"harness"`
 }
+type AutoState struct {
+	Auto         string `json:"auto"`
+	Orchestrator string `json:"orchestrator"`
+}
 type ChatResult struct {
 	OK    bool   `json:"ok"`
 	Text  string `json:"text"`
@@ -172,6 +176,16 @@ func (c *Client) call(ctx context.Context, verb string, params any, event func(j
 func (c *Client) Ping(ctx context.Context) error { _, err := c.call(ctx, "ping", nil, nil); return err }
 func (c *Client) Status(ctx context.Context) (json.RawMessage, error) {
 	return c.call(ctx, "status", nil, nil)
+}
+func (c *Client) Auto(ctx context.Context) (AutoState, error) {
+	b, err := c.Status(ctx)
+	var out AutoState
+	return out, decode(b, &out, err)
+}
+func (c *Client) SetAuto(ctx context.Context, enabled bool) (AutoState, error) {
+	b, err := c.call(ctx, "auto.set", map[string]bool{"enabled": enabled}, nil)
+	var out AutoState
+	return out, decode(b, &out, err)
 }
 func (c *Client) Sessions(ctx context.Context) ([]Session, error) {
 	b, err := c.call(ctx, "sessions.list", nil, nil)

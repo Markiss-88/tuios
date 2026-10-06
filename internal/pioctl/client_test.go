@@ -57,8 +57,15 @@ func fixtureName(q map[string]any) string {
 	verb, _ := q["verb"].(string)
 	params, _ := q["params"].(map[string]any)
 	switch verb {
-	case "status", "sessions.switch":
+	case "status":
+		return "status"
+	case "sessions.switch":
 		return "ping"
+	case "auto.set":
+		if params["enabled"] == true {
+			return "auto.set.on"
+		}
+		return "auto.set.off"
 	case "tasks.list":
 		if params["status"] == "working" {
 			return "tasks.list.working"
@@ -166,6 +173,54 @@ func TestVerbsAndStream(t *testing.T) {
 	events := 0
 	if got, err := c.Send(ctx, "default", "hi", func(json.RawMessage) { events++ }); err != nil || !got.OK || got.Text != "echo: hello" || events != 3 {
 		t.Fatalf("send: %+v %v events=%d", got, err, events)
+	}
+}
+
+func TestAutoAndSetAuto(t *testing.T) {
+	var requests []map[string]any
+	c := fakeRequest(t, func(q map[string]any) []string {
+		requests = append(requests, q)
+		switch q["verb"] {
+		case "status":
+			return []string{`{"ok":true,"result":{"auto":"off","orchestrator":"stopped"}}`}
+		case "auto.set":
+			if q["params"].(map[string]any)["enabled"] == true {
+				return []string{`{"ok":true,"result":{"auto":"on","orchestrator":"running"}}`}
+			}
+			return []string{`{"ok":true,"result":{"auto":"off","orchestrator":"stopped"}}`}
+		default:
+			t.Fatalf("verb = %v", q["verb"])
+			return nil
+		}
+	})
+	state, err := c.Auto(context.Background())
+	if err != nil || state != (AutoState{Auto: "off", Orchestrator: "stopped"}) {
+		t.Fatalf("Auto = %+v, %v", state, err)
+	}
+	state, err = c.SetAuto(context.Background(), true)
+	if err != nil || state != (AutoState{Auto: "on", Orchestrator: "running"}) {
+		t.Fatalf("SetAuto = %+v, %v", state, err)
+	}
+	if got := requests[1]["params"].(map[string]any)["enabled"]; got != true {
+		t.Fatalf("auto.set enabled = %#v", got)
+	}
+	state, err = c.SetAuto(context.Background(), false)
+	if err != nil || state != (AutoState{Auto: "off", Orchestrator: "stopped"}) {
+		t.Fatalf("SetAuto false = %+v, %v", state, err)
+	}
+	if got := requests[2]["params"].(map[string]any)["enabled"]; got != false {
+		t.Fatalf("auto.set enabled = %#v", got)
+	}
+}
+
+func TestSetAutoRejectsInvalidParams(t *testing.T) {
+	c := fake(t, func(string) []string {
+		return []string{`{"ok":false,"error":{"code":"invalid_params","message":"enabled must be a boolean"}}`}
+	})
+	_, err := c.SetAuto(context.Background(), false)
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) || requestErr.Code != "invalid_params" || requestErr.Message != "enabled must be a boolean" {
+		t.Fatalf("SetAuto error = %v", err)
 	}
 }
 func TestRejectedMalformedAndUnreachable(t *testing.T) {
@@ -277,6 +332,16 @@ func TestHistoryRejectsUnknownAndBadLimit(t *testing.T) {
 func TestRealWireDecodes(t *testing.T) {
 	c := fixture(t)
 	ctx := context.Background()
+	auto, err := c.Auto(ctx)
+	if err != nil || auto != (AutoState{Auto: "off", Orchestrator: "stopped"}) {
+		t.Fatalf("auto=%+v err=%v", auto, err)
+	}
+	if auto, err = c.SetAuto(ctx, true); err != nil || auto != (AutoState{Auto: "on", Orchestrator: "running"}) {
+		t.Fatalf("auto on=%+v err=%v", auto, err)
+	}
+	if auto, err = c.SetAuto(ctx, false); err != nil || auto != (AutoState{Auto: "off", Orchestrator: "stopped"}) {
+		t.Fatalf("auto off=%+v err=%v", auto, err)
+	}
 	tasks, err := c.Tasks(ctx, "")
 	if err != nil || len(tasks) != 3 || tasks[0].Status != "done" || tasks[1].Status != "working" || tasks[2].Status != "todo" {
 		t.Fatalf("tasks=%+v err=%v", tasks, err)
@@ -325,6 +390,18 @@ func TestLiveAgainstRealPio(t *testing.T) {
 	}
 	if _, err := c.Status(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if state, err := c.SetAuto(ctx, true); err != nil || state.Auto != "on" {
+		t.Fatalf("auto on: state=%+v err=%v", state, err)
+	}
+	if state, err := c.Auto(ctx); err != nil || state.Auto != "on" {
+		t.Fatalf("auto on status: state=%+v err=%v", state, err)
+	}
+	if state, err := c.SetAuto(ctx, false); err != nil || state.Auto != "off" {
+		t.Fatalf("auto off: state=%+v err=%v", state, err)
+	}
+	if state, err := c.Auto(ctx); err != nil || state.Auto != "off" {
+		t.Fatalf("auto off status: state=%+v err=%v", state, err)
 	}
 	status, err := c.call(ctx, "status", nil, nil)
 	if err != nil {

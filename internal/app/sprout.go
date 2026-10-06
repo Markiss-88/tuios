@@ -20,6 +20,8 @@ type sproutClient interface {
 	Create(context.Context, string) (pioctl.Session, error)
 	Switch(context.Context, string) error
 	GetConfig(context.Context) (pioctl.Config, error)
+	Auto(context.Context) (pioctl.AutoState, error)
+	SetAuto(context.Context, bool) (pioctl.AutoState, error)
 	Tasks(context.Context, string) ([]pioctl.Task, error)
 	Goals(context.Context, string) ([]pioctl.Goal, error)
 	Jobs(context.Context, bool) ([]pioctl.Job, error)
@@ -45,6 +47,7 @@ type SproutState struct {
 	Goals                       []pioctl.Goal
 	Jobs                        []pioctl.Job
 	Config                      pioctl.Config
+	Auto                        pioctl.AutoState
 	Transcript                  []pioctl.Entry
 	Composer, Status            string
 	StatusAt                    time.Time
@@ -61,8 +64,15 @@ type SproutState struct {
 type SproutRefreshMsg struct {
 	Sessions []pioctl.Session
 	Config   pioctl.Config
+	Auto     pioctl.AutoState
+	AutoErr  error
 	Err      error
 	Gen      uint64
+}
+type SproutAutoMsg struct {
+	State pioctl.AutoState
+	Err   error
+	Gen   uint64
 }
 type SproutHistoryMsg struct {
 	Session string
@@ -237,7 +247,8 @@ func (m *OS) sproutRefreshCmd() tea.Cmd {
 			return SproutRefreshMsg{Err: err, Gen: gen}
 		}
 		cfg, _ := client.GetConfig(ctx)
-		return SproutRefreshMsg{Sessions: sessions, Config: cfg, Gen: gen}
+		auto, autoErr := client.Auto(ctx)
+		return SproutRefreshMsg{Sessions: sessions, Config: cfg, Auto: auto, AutoErr: autoErr, Gen: gen}
 	}
 }
 
@@ -315,6 +326,18 @@ func (m *OS) sproutHarnessCmd(name, model string) tea.Cmd {
 		return SproutHarnessMsg{Result: result, Err: err, Gen: gen}
 	}
 }
+func (m *OS) sproutSetAutoCmd(enabled bool) tea.Cmd {
+	gen, client := m.Sprout.gen, m.Sprout.client
+	return func() tea.Msg {
+		if client == nil {
+			return SproutAutoMsg{Err: pioctl.ErrUnreachable, Gen: gen}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		state, err := client.SetAuto(ctx, enabled)
+		return SproutAutoMsg{State: state, Err: err, Gen: gen}
+	}
+}
 func (m *OS) sproutTick() tea.Cmd {
 	gen := m.Sprout.gen
 	return tea.Tick(2*time.Second, func(at time.Time) tea.Msg { return SproutTickMsg{Gen: gen, At: at} })
@@ -374,6 +397,9 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 			return m.sproutTick()
 		}
 		s.Sessions, s.Config = x.Sessions, x.Config
+		if x.AutoErr == nil {
+			s.Auto = x.Auto
+		}
 		s.syncSessionCursor()
 		if s.Status == "pio: unreachable" {
 			s.clearStatus()
@@ -449,6 +475,16 @@ func (m *OS) handleSproutMsg(msg tea.Msg) tea.Cmd {
 		s.Config.Harness.Name, s.Config.Harness.Model = x.Result.Name, x.Result.Model
 		s.setNotice("harness: " + x.Result.Name + " " + x.Result.Model)
 		s.Focus = "sidebar"
+	case SproutAutoMsg:
+		if x.Gen != s.gen || !m.ShowSprout {
+			return nil
+		}
+		if x.Err != nil {
+			s.setNotice(sproutError(x.Err))
+			return nil
+		}
+		s.Auto = x.State
+		s.setNotice("auto: " + x.State.Auto)
 	case SproutStreamMsg:
 		terminal := x.Type == ""
 		// WHY: a command may outlive its pane; generation keeps its stream off a new chat.
@@ -639,6 +675,8 @@ func (m *OS) SproutHandleKey(key string) tea.Cmd {
 		}
 	case "i":
 		s.Focus = "composer"
+	case "a":
+		return m.sproutSetAutoCmd(s.Auto.Auto != "on")
 	case "f":
 		switch s.Subnav {
 		case 0:

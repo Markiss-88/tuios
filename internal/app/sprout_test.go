@@ -32,11 +32,14 @@ type fakeSproutClient struct {
 	goals                                                         []pioctl.Goal
 	jobs                                                          []pioctl.Job
 	config                                                        pioctl.Config
+	auto                                                          pioctl.AutoState
 	task                                                          pioctl.Task
 	goal                                                          pioctl.Goal
 	harness                                                       pioctl.HarnessResult
 	tasksErr, goalsErr, jobsErr, taskErr, goalErr, harnessErr     error
+	autoErr, setAutoErr                                           error
 	setHarness                                                    [][2]string
+	setAuto                                                       []bool
 	sends                                                         [][2]string
 	taskTitles, goalTitles                                        []string
 	sessionsCalls, configCalls, tasksCalls, goalsCalls, jobsCalls int
@@ -59,6 +62,11 @@ func (f *fakeSproutClient) Switch(_ context.Context, id string) error {
 func (f *fakeSproutClient) GetConfig(context.Context) (pioctl.Config, error) {
 	f.configCalls++
 	return f.config, nil
+}
+func (f *fakeSproutClient) Auto(context.Context) (pioctl.AutoState, error) { return f.auto, f.autoErr }
+func (f *fakeSproutClient) SetAuto(_ context.Context, enabled bool) (pioctl.AutoState, error) {
+	f.setAuto = append(f.setAuto, enabled)
+	return f.auto, f.setAutoErr
 }
 func (f *fakeSproutClient) Tasks(context.Context, string) ([]pioctl.Task, error) {
 	f.tasksCalls++
@@ -705,21 +713,30 @@ func TestSproutFrameDump(t *testing.T) {
 		{"HINTS", func(m *OS) { m.Sprout.Focus = "hints" }},
 	}
 	for _, size := range [][2]int{{80, 24}, {120, 40}} {
-		for _, view := range views {
-			m := sproutOS(fake)
-			m.Width, m.Height = size[0], size[1]
-			view.apply(m)
-			frame := ansi.Strip(m.renderSprout())
-			lines := strings.Split(frame, "\n")
-			if len(lines) != size[1] {
-				t.Fatalf("%s %dx%d lines=%d", view.name, size[0], size[1], len(lines))
-			}
-			for _, line := range lines {
-				if lipgloss.Width(line) > size[0] {
-					t.Fatalf("%s %dx%d overflow %q", view.name, size[0], size[1], line)
+		for _, auto := range []string{"on", "off"} {
+			for _, view := range views {
+				m := sproutOS(fake)
+				m.Width, m.Height = size[0], size[1]
+				m.Sprout.Auto = pioctl.AutoState{Auto: auto, Orchestrator: "running"}
+				view.apply(m)
+				frame := ansi.Strip(m.renderSprout())
+				lines := strings.Split(frame, "\n")
+				if len(lines) != size[1] {
+					t.Fatalf("%s %dx%d lines=%d", view.name, size[0], size[1], len(lines))
 				}
+				for _, line := range lines {
+					if lipgloss.Width(line) > size[0] {
+						t.Fatalf("%s %dx%d overflow %q", view.name, size[0], size[1], line)
+					}
+				}
+				if !strings.Contains(frame, "auto "+auto) {
+					t.Fatalf("%s %dx%d missing auto %s:\n%s", view.name, size[0], size[1], auto, frame)
+				}
+				if !strings.Contains(frame, "a auto") {
+					t.Fatalf("%s %dx%d missing auto hint:\n%s", view.name, size[0], size[1], frame)
+				}
+				t.Logf("--- %s %s %dx%d ---\n%s", view.name, auto, size[0], size[1], frame)
 			}
-			t.Logf("--- %s %dx%d ---\n%s", view.name, size[0], size[1], frame)
 		}
 	}
 }
@@ -765,6 +782,72 @@ func TestSproutSuccessfulRefreshClearsUnreachableNotice(t *testing.T) {
 	m.handleSproutMsg(SproutRefreshMsg{Gen: 1, Sessions: m.Sprout.Sessions})
 	if m.Sprout.Status != "" {
 		t.Fatalf("status = %q after successful refresh, want cleared", m.Sprout.Status)
+	}
+}
+
+func TestSproutAutoRefreshToggleAndNotice(t *testing.T) {
+	fake := &fakeSproutClient{sessions: []pioctl.Session{{ID: "a"}}, auto: pioctl.AutoState{Auto: "off", Orchestrator: "stopped"}}
+	m := sproutOS(fake)
+	m.Sprout.gen = 1
+	driveSprout(t, m, m.sproutRefreshCmd())
+	if got := m.Sprout.Auto; got != fake.auto {
+		t.Fatalf("auto after refresh = %+v, want %+v", got, fake.auto)
+	}
+	fake.auto = pioctl.AutoState{Auto: "on", Orchestrator: "running"}
+	msg := m.SproutHandleKey("a")()
+	if follow := m.handleSproutMsg(msg); follow != nil {
+		t.Fatalf("auto toggle follow-up = %T, want nil", follow())
+	}
+	if got := fake.setAuto; !reflect.DeepEqual(got, []bool{true}) {
+		t.Fatalf("SetAuto calls = %v, want [true]", got)
+	}
+	if got := m.Sprout.Auto; got != fake.auto {
+		t.Fatalf("auto after toggle = %+v, want %+v", got, fake.auto)
+	}
+	if got := m.Sprout.Status; got != "auto: on" {
+		t.Fatalf("notice = %q, want auto: on", got)
+	}
+	if !m.Sprout.StatusAt.IsZero() {
+		m.handleSproutMsg(SproutTickMsg{Gen: 1, At: m.Sprout.StatusAt.Add(sproutNoticeDuration)})
+	}
+	if got := m.Sprout.Status; got != "" {
+		t.Fatalf("expired notice = %q", got)
+	}
+	fake.auto = pioctl.AutoState{Auto: "off", Orchestrator: "stopped"}
+	driveSprout(t, m, m.SproutHandleKey("a"))
+	if got := fake.setAuto; !reflect.DeepEqual(got, []bool{true, false}) {
+		t.Fatalf("SetAuto calls = %v, want [true false]", got)
+	}
+	fake.auto, fake.autoErr = pioctl.AutoState{Auto: "on", Orchestrator: "running"}, &pioctl.RequestError{Code: "internal", Message: "status unavailable"}
+	driveSprout(t, m, m.sproutRefreshCmd())
+	if got := m.Sprout.Auto.Auto; got != "off" || !m.Sprout.Connected {
+		t.Fatalf("auto failure state=%+v connected=%t", m.Sprout.Auto, m.Sprout.Connected)
+	}
+}
+
+func TestSproutAutoRejectComposerAndStaleReply(t *testing.T) {
+	fake := &fakeSproutClient{auto: pioctl.AutoState{Auto: "off", Orchestrator: "running"}}
+	m := sproutOS(fake)
+	m.Sprout.gen = 1
+	m.Sprout.Auto = fake.auto
+	fake.setAutoErr = &pioctl.RequestError{Code: "invalid_params", Message: "enabled must be a boolean"}
+	driveSprout(t, m, m.SproutHandleKey("a"))
+	if got := m.Sprout.Auto.Auto; got != "off" {
+		t.Fatalf("auto after rejected set = %q", got)
+	}
+	if got := m.Sprout.Status; got != "enabled must be a boolean" {
+		t.Fatalf("rejection notice = %q", got)
+	}
+	m.Sprout.Focus = "composer"
+	m.SproutHandleKey("a")
+	if got := m.Sprout.Composer; got != "a" || len(fake.setAuto) != 1 {
+		t.Fatalf("composer=%q calls=%v", got, fake.setAuto)
+	}
+	m.Sprout.Focus, m.Sprout.Status = "sidebar", ""
+	m.Sprout.gen++
+	m.handleSproutMsg(SproutAutoMsg{State: pioctl.AutoState{Auto: "on"}, Gen: 1})
+	if got := m.Sprout.Auto.Auto; got != "off" || m.Sprout.Status != "" {
+		t.Fatalf("stale auto applied: %+v status=%q", m.Sprout.Auto, m.Sprout.Status)
 	}
 }
 

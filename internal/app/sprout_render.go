@@ -86,7 +86,14 @@ func (m *OS) renderSprout() string {
 	if composer+1 < len(right) {
 		status := m.Sprout.Status
 		if status == "" {
-			status = harness + "  " + m.Sprout.Config.Harness.Model
+			auto := "auto off"
+			if m.Sprout.Auto.Auto == "on" {
+				auto = "auto on"
+				if m.Sprout.Auto.Orchestrator == "stopped" {
+					auto += "  orchestrator stopped"
+				}
+			}
+			status = overlay.Truncate(harness+"  "+m.Sprout.Config.Harness.Model, max(0, mainW-lipgloss.Width(auto)-2)) + "  " + auto
 		}
 		right[composer+1] = status
 	}
@@ -108,11 +115,11 @@ func (m *OS) renderSprout() string {
 	if m.Sprout.Status != "" {
 		state = m.Sprout.Status
 	}
-	hints := "Esc leave  Tab focus  i compose"
+	hints := "Esc leave  Tab focus  i compose  a auto"
 	if m.Sprout.Subnav == 1 {
-		hints = "Esc leave  f filter  n new task  h harness  m model"
+		hints = "Esc leave  f filter  n new task  h harness  m model  a auto"
 	} else if m.Sprout.Subnav == 2 {
-		hints = "Esc leave  f filter  r recent jobs  n new goal  h harness"
+		hints = "Esc leave  f filter  r jobs  n new goal  h harness  a auto"
 	}
 	lines = append(lines, style(pal.FgMute, pal.Canvas).Render(overlay.Truncate(state+"  "+m.SessionName+"  "+hints, w)))
 	return strings.Join(lines, "\n")
@@ -218,7 +225,7 @@ func sproutGoalGlyph(status string) string {
 func (m *OS) sproutMain(right []string, composer, width int, pal overlay.Palette, style func(color.Color, color.Color) lipgloss.Style) {
 	s := &m.Sprout
 	if s.Focus == "hints" {
-		for i, line := range []string{"Sprout keys", "Tab switch subnav", "Conversations: i compose  n new chat  f filter", "[ / ] project  p switcher  j/k scroll  G follow", "Files: f filter  j/k select  n new task", "Workflows: f filter  j/k select  r recent jobs  n new goal", "h harness  m model  ? close hints", "Esc leave"} {
+		for i, line := range []string{"Sprout keys", "Tab switch subnav", "Conversations: i compose  n new chat  f filter", "[ / ] project  p switcher  j/k scroll  G follow", "Files: f filter  j/k select  n new task", "Workflows: f filter  j/k select  r recent jobs  n new goal", "a auto  h harness  m model  ? close hints", "Esc leave"} {
 			if i < composer {
 				right[i] = line
 			}
