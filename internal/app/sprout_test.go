@@ -149,6 +149,52 @@ func requireSproutTick(t *testing.T, m *OS, cmd tea.Cmd) {
 	}
 }
 
+func TestInitStartsSproutWhenRequested(t *testing.T) {
+	fake := &fakeSproutClient{sessions: []pioctl.Session{{ID: "active", Active: true}}, history: map[string][]pioctl.Entry{"active": nil}}
+	m := NewOS(OSOptions{StartSprout: true})
+	m.Sprout.client = fake
+	m.Init()
+
+	if !m.ShowSprout {
+		t.Fatal("Init did not open Sprout")
+	}
+	if got := m.Sprout.Focus; got != "sidebar" {
+		t.Fatalf("focus = %q, want sidebar", got)
+	}
+	batch := sproutBatch(t, m.handleSproutMsg(m.sproutRefreshCmd()()))
+	ticks := 0
+	for _, cmd := range batch {
+		switch msg := cmd().(type) {
+		case SproutHistoryMsg:
+			if follow := m.handleSproutMsg(msg); follow != nil {
+				t.Fatalf("history follow-up = %T", follow())
+			}
+		case SproutTickMsg:
+			if msg.Gen != m.Sprout.gen {
+				t.Fatalf("tick generation = %d, want %d", msg.Gen, m.Sprout.gen)
+			}
+			ticks++
+		default:
+			t.Fatalf("batch message = %T", msg)
+		}
+	}
+	if ticks != 1 {
+		t.Fatalf("ticks = %d, want 1", ticks)
+	}
+}
+
+func TestInitLeavesSproutClosedByDefault(t *testing.T) {
+	m := NewOS(OSOptions{})
+	m.Init()
+
+	if m.ShowSprout {
+		t.Fatal("Init opened Sprout without a request")
+	}
+	if m.Sprout.client != nil || m.Sprout.gen != 0 {
+		t.Fatalf("Init produced Sprout startup state: %+v", m.Sprout)
+	}
+}
+
 func TestSproutFirstRefreshSelectsAndRearmsTick(t *testing.T) {
 	fake := &fakeSproutClient{sessions: []pioctl.Session{{ID: "active", Active: true}}, history: map[string][]pioctl.Entry{"active": nil}}
 	m := sproutOS(fake)

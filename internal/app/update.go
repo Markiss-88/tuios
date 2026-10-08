@@ -310,6 +310,9 @@ func (m *OS) Init() tea.Cmd {
 		ListenForNotification(m.ensureNotificationChan()),
 		ListenForCwdChange(m.ensureCwdChangeChan()),
 	}
+	if m.startSprout {
+		cmds = append(cmds, m.OpenSprout())
+	}
 
 	// Ask the terminal for its own colours where the startup probe could not,
 	// and follow its light and dark switch. See host_colors.go.

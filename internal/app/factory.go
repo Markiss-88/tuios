@@ -57,6 +57,10 @@ type OSOptions struct {
 	// ShowKeys enables the key display overlay.
 	ShowKeys bool
 
+	// StartSprout opens Sprout during Init. It is client state, so attached
+	// clients can choose it without changing their shared daemon session.
+	StartSprout bool
+
 	// NumWorkspaces sets the number of workspaces (default: 9).
 	NumWorkspaces int
 
@@ -201,6 +205,7 @@ func NewOS(opts OSOptions) *OS {
 		BrowserClient:     opts.BrowserClient,
 		LearnMode:         opts.LearnMode,
 		ShowKeys:          opts.ShowKeys,
+		startSprout:       opts.StartSprout,
 		RecentKeys:        []KeyEvent{},
 		KeyHistoryMaxSize: 5,
 

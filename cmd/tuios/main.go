@@ -39,6 +39,7 @@ var (
 	previewTheme   string
 	skillTopic     string
 	standaloneMode bool
+	sproutMode     bool
 	// interfaceFlags is the appearance and interface flags, shared by every
 	// command that renders the TUI. See registerInterfaceFlags.
 	interfaceFlags cliflags.Interface
@@ -82,6 +83,7 @@ func main() {
 // test can resolve a command line against the real tree rather than against a
 // second description of it that would drift.
 func newRootCommand() *cobra.Command {
+	sproutMode = os.Getenv("TUIOS_SPROUT") == "1"
 	rootCmd := &cobra.Command{
 		Use:   "tuios",
 		Short: "Terminal UI Operating System",
@@ -176,6 +178,7 @@ comprehensive keyboard/mouse interactions.`,
 	// The way out of startup.daemon for one run. It is on the root command
 	// because that is the only command the setting changes.
 	rootCmd.Flags().BoolVar(&standaloneMode, "standalone", false, "Run a standalone session without the daemon, overriding startup.daemon (TUIOS_NO_DAEMON=1 does the same for a whole shell)")
+	rootCmd.Flags().BoolVar(&sproutMode, "sprout", sproutMode, "Open Sprout on startup (TUIOS_SPROUT=1 does the same)")
 	rootCmd.Flags().BoolVar(&listThemes, "list-themes", false, "List all available themes and exit")
 	rootCmd.Flags().StringVar(&previewTheme, "preview-theme", "", "Preview a theme's 16 ANSI colors")
 
